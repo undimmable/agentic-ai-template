@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..errors import ToolError
-from .base import Tool, TOOL_REGISTRY
+from .base import TOOL_REGISTRY, Tool
 
 _MAX_OUTPUT = 200_000
 

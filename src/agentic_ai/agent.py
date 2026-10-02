@@ -121,7 +121,7 @@ class Agent:
             if on_event is not None:
                 try:
                     on_event(event)
-                except Exception:  # noqa: BLE001 - observers must not break the loop
+                except Exception:
                     self.logger.exception("event observer raised; ignoring")
 
         run_id = uuid4().hex[:8]
@@ -238,6 +238,6 @@ class Agent:
         except AgenticError as exc:
             self.logger.warning("tool %s failed: %s", call.name, exc)
             return f"Error executing '{call.name}': {exc}"
-        except Exception as exc:  # noqa: BLE001 - surface everything to the model
+        except Exception as exc:
             self.logger.exception("unexpected error in tool %s", call.name)
             return f"Error executing '{call.name}': {exc}"

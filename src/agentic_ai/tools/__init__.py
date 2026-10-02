@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict
 
 from . import builtin
-from .base import FunctionTool, TOOL_REGISTRY, Tool, tool
+from .base import TOOL_REGISTRY, FunctionTool, Tool, tool
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..config import ToolConfig
@@ -27,4 +27,4 @@ def build_tools(config: "ToolConfig") -> Dict[str, Tool]:
     return tools
 
 
-__all__ = ["Tool", "FunctionTool", "tool", "TOOL_REGISTRY", "build_tools"]
+__all__ = ["TOOL_REGISTRY", "FunctionTool", "Tool", "build_tools", "tool"]

@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.5",
+    "ruff>=0.6",
 ]
 
 [project.scripts]
@@ -28,3 +29,28 @@ where = ["src"]
 testpaths = ["src/tests"]
 pythonpath = ["src"]
 addopts = "-q"
+
+[tool.ruff]
+# Match the runtime floor declared in `requires-python`.
+target-version = "py39"
+line-length = 88
+
+[tool.ruff.lint]
+# Start from ruff's defaults (E4/E7/E9 + F) and add the rule families the
+# codebase already opts into via `# noqa: BLE001` comments.
+select = ["E", "F", "W", "I", "BLE", "UP", "B", "C4", "SIM", "RUF"]
+# The project deliberately uses `typing.Dict`/`List`/`Tuple`/`Optional` for
+# readability and 3.9 compatibility, so the pyupgrade rules that rewrite those
+# to builtin generics / `X | None` are turned off.
+ignore = [
+    "UP006", # use `list`/`dict`/`tuple` instead of `typing.List`/`Dict`/`Tuple`
+    "UP035", # `typing.List` etc. are deprecated
+    "UP045", # use `X | None` instead of `Optional[X]`
+    "UP037", # remove quotes from type annotation
+    "RUF012", # mutable class-attribute defaults (intentional for tool schemas)
+    "E501",  # line length is handled by the formatter, not the linter
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use `dict(...)`, bare asserts and long literals freely.
+"src/tests/*" = ["C408", "PLW1510"]

@@ -265,8 +265,8 @@ class SessionStore:
 
 
 __all__ = [
-    "SessionStore",
-    "SessionInfo",
-    "SessionError",
     "DEFAULT_DB_PATH",
+    "SessionError",
+    "SessionInfo",
+    "SessionStore",
 ]

@@ -439,3 +439,84 @@ def test_app_save_skips_empty_conversation():
     # Only the system prompt is present, so nothing is worth saving.
     assert app.save_session() is None
     assert store.list_sessions() == []
+
+
+# --------------------------------------------------------------------------- #
+# visible window (scroll clamping)
+# --------------------------------------------------------------------------- #
+def test_visible_lines_shows_bottom_when_not_scrolled():
+    lines = [(tui.STYLE_AGENT, str(i)) for i in range(10)]
+    assert tui.visible_lines(lines, body_height=3, scroll=0) == lines[-3:]
+
+
+def test_visible_lines_scrolls_up():
+    lines = [(tui.STYLE_AGENT, str(i)) for i in range(10)]
+    assert tui.visible_lines(lines, body_height=3, scroll=2) == lines[5:8]
+
+
+def test_visible_lines_clamps_oversized_scroll():
+    # Regression: a scroll offset larger than the content used to yield an
+    # empty window, blanking the view (e.g. after loading a shorter session).
+    lines = [(tui.STYLE_AGENT, str(i)) for i in range(4)]
+    assert tui.visible_lines(lines, body_height=3, scroll=999) == lines[:3]
+
+
+def test_visible_lines_handles_zero_height():
+    lines = [(tui.STYLE_AGENT, "x")]
+    assert tui.visible_lines(lines, body_height=0, scroll=0) == []
+
+
+def test_load_session_resets_scroll_so_dump_is_visible():
+    # Regression: loading a session while scrolled up left the scroll offset
+    # untouched, so the freshly loaded conversation was not drawn.
+    store = make_store()
+    session_id = store.save_session(
+        "earlier",
+        [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ],
+    )
+    app = tui.TuiApp(AgentConfig(), make_agent([]), store=store)
+    app.scroll = 500  # simulate having scrolled up in a longer conversation
+
+    assert app.load_session(session_id) is True
+    assert app.scroll == 0
+
+    lines = tui.render_transcript(app.transcript, width=40)
+    visible = tui.visible_lines(lines, body_height=10, scroll=app.scroll)
+    texts = [text for _, text in visible]
+    assert any("old question" in t for t in texts)
+    assert any("old answer" in t for t in texts)
+
+
+# --------------------------------------------------------------------------- #
+# screen layout (input box pinned to the bottom)
+# --------------------------------------------------------------------------- #
+def test_layout_pins_input_box_to_bottom():
+    geom = tui.layout(height=24, width=80)
+    # Input box occupies the three rows just above the status line.
+    assert geom.input_height == tui.INPUT_BOX_HEIGHT
+    assert geom.input_top == 24 - 1 - tui.INPUT_BOX_HEIGHT
+    assert geom.status_row == 23
+    # Transcript fills everything above the box.
+    assert geom.transcript_top == 0
+    assert geom.transcript_height == geom.input_top
+    assert geom.usable
+
+
+def test_layout_input_box_never_overlaps_status():
+    geom = tui.layout(height=10, width=40)
+    # The box's bottom border sits directly above the status row.
+    assert geom.input_top + geom.input_height == geom.status_row
+
+
+def test_layout_transcript_collapses_when_terminal_is_short():
+    geom = tui.layout(height=4, width=40)
+    assert geom.transcript_height == 0
+    assert not geom.usable
+
+
+def test_layout_rejects_narrow_terminal():
+    assert not tui.layout(height=24, width=10).usable

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Dict
+from typing import TYPE_CHECKING, Callable
 
 from ..errors import ProviderError
 from ..registry import Registry
@@ -34,9 +34,9 @@ def build_provider(config: "ProviderConfig") -> LLMProvider:
 
 
 __all__ = [
+    "PROVIDER_REGISTRY",
     "LLMProvider",
     "OpenAICompatibleProvider",
     "StubProvider",
-    "PROVIDER_REGISTRY",
     "build_provider",
 ]

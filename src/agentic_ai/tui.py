@@ -19,18 +19,19 @@ importable Python and therefore testable without a terminal:
 * :class:`TranscriptEntry` / :class:`Transcript` - the scrollback model.
 * :func:`parse_command` - slash-command parsing.
 * :class:`AgentWorker` - the background agent runner and its event queue.
+* :func:`layout` - the pure geometry of the screen (transcript vs. input box).
 * :class:`TuiApp` - the curses view/controller.
 """
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from .agent import (
-    EVENT_FINAL,
     EVENT_TOOL_CALL,
     EVENT_TOOL_RESULT,
     Agent,
@@ -314,6 +315,88 @@ def render_transcript(
     return rendered
 
 
+def visible_lines(
+    lines: List[Tuple[str, str]], body_height: int, scroll: int
+) -> List[Tuple[str, str]]:
+    """Return the slice of ``lines`` currently on screen.
+
+    ``scroll`` is the number of lines scrolled *up* from the bottom (0 shows
+    the most recent lines). The scroll offset is clamped to the available
+    content so a stale, too-large offset can never blank the view - which is
+    what used to happen after loading a shorter session while scrolled up.
+    """
+
+    if body_height <= 0:
+        return []
+    max_scroll = max(0, len(lines) - body_height)
+    scroll = min(max(0, scroll), max_scroll)
+    end = len(lines) - scroll
+    start = max(0, end - body_height)
+    return lines[start:end]
+
+
+# --------------------------------------------------------------------------- #
+# screen layout (pure geometry, so it can be unit-tested without curses)
+# --------------------------------------------------------------------------- #
+#: Height of the pinned input box: a top border, the input line, a bottom border.
+INPUT_BOX_HEIGHT = 3
+#: Height of the status/hint line pinned below the input box.
+STATUS_HEIGHT = 1
+#: Minimum terminal size we are willing to draw into.
+MIN_HEIGHT = 6
+MIN_WIDTH = 20
+
+
+@dataclass
+class Layout:
+    """Where each region of the screen lives, in rows from the top.
+
+    The input box and status line are pinned to the bottom of the terminal;
+    the transcript occupies whatever is left above them. This mirrors the
+    layout used by Codex / opencode, where the composer stays put at the
+    bottom and the conversation scrolls above it.
+    """
+
+    height: int
+    width: int
+    transcript_top: int
+    transcript_height: int
+    input_top: int
+    input_height: int
+    status_row: int
+
+    @property
+    def usable(self) -> bool:
+        """Whether the terminal is large enough to draw the full layout."""
+
+        return self.height >= MIN_HEIGHT and self.width >= MIN_WIDTH
+
+
+def layout(height: int, width: int) -> Layout:
+    """Compute the screen geometry for a terminal of ``height`` x ``width``.
+
+    The bottom of the screen is reserved for the input box and the status
+    line; the transcript fills the rows above. When the terminal is too small
+    the transcript is allowed to collapse to zero rows rather than pushing the
+    input box off-screen.
+    """
+
+    input_height = INPUT_BOX_HEIGHT
+    status_row = height - 1
+    input_top = height - 1 - input_height
+    transcript_top = 0
+    transcript_height = max(0, input_top - transcript_top)
+    return Layout(
+        height=height,
+        width=width,
+        transcript_top=transcript_top,
+        transcript_height=transcript_height,
+        input_top=input_top,
+        input_height=input_height,
+        status_row=status_row,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # curses application
 # --------------------------------------------------------------------------- #
@@ -425,6 +508,11 @@ class TuiApp:
         self.session_id = session_id
         self.transcript.clear()
         self._render_messages(messages)
+        # Jump back to the bottom so the freshly loaded conversation is shown
+        # from its most recent line. Without this, a scroll offset left over
+        # from a longer previous conversation could hide the loaded dump.
+        self.scroll = 0
+        self.status = "ready"
         self.transcript.add(
             "system", f"loaded session {session_id}", STYLE_SYSTEM
         )
@@ -595,6 +683,7 @@ class TuiApp:
         curses.init_pair(4, curses.COLOR_RED, -1)  # error
         curses.init_pair(5, curses.COLOR_BLUE, -1)  # system
         curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)  # status bar
+        curses.init_pair(7, curses.COLOR_WHITE, -1)  # input box border
 
     def _color_for(self, curses: Any, style: str) -> int:  # pragma: no cover
         pair = {
@@ -646,45 +735,85 @@ class TuiApp:
     def _draw(self, curses: Any, stdscr: Any) -> None:  # pragma: no cover
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        if height < 4 or width < 20:
+        geom = layout(height, width)
+        if not geom.usable:
             stdscr.addnstr(0, 0, "terminal too small", max(0, width - 1))
             stdscr.refresh()
             return
 
-        body_height = height - 3
-        lines = render_transcript(self.transcript, width - 2)
-        # clamp scroll to available content
+        self._draw_transcript(curses, stdscr, geom)
+        self._draw_input_box(curses, stdscr, geom)
+        self._draw_status(curses, stdscr, geom)
+        stdscr.refresh()
+
+    def _draw_transcript(
+        self, curses: Any, stdscr: Any, geom: Layout
+    ) -> None:  # pragma: no cover - terminal
+        """Draw the scrolling conversation above the input box."""
+
+        body_height = geom.transcript_height
+        if body_height <= 0:
+            return
+        lines = render_transcript(self.transcript, geom.width - 2)
+        # Clamp scroll to available content and take the visible slice.
         max_scroll = max(0, len(lines) - body_height)
         self.scroll = min(self.scroll, max_scroll)
-        end = len(lines) - self.scroll
-        start = max(0, end - body_height)
-        visible = lines[start:end]
+        visible = visible_lines(lines, body_height, self.scroll)
 
-        for row, (style, text) in enumerate(visible):
+        # Bottom-align the content so the newest line sits just above the box.
+        top = geom.transcript_top + (body_height - len(visible))
+        for offset, (style, text) in enumerate(visible):
             attr = self._color_for(curses, style)
-            stdscr.addnstr(row, 0, text, width - 1, attr)
+            stdscr.addnstr(top + offset, 0, text, geom.width - 1, attr)
 
-        # separator + input line
-        sep_row = height - 3
-        stdscr.addnstr(sep_row, 0, "-" * (width - 1), width - 1)
+    def _draw_input_box(
+        self, curses: Any, stdscr: Any, geom: Layout
+    ) -> None:  # pragma: no cover - terminal
+        """Draw the bordered composer pinned to the bottom of the screen."""
+
+        top = geom.input_top
+        inner_width = max(0, geom.width - 2)
+        border_attr = self._color_for(curses, STYLE_SYSTEM)
+
+        # Top border: +-----+
+        stdscr.addnstr(top, 0, "+" + "-" * inner_width + "+", geom.width, border_attr)
+
+        # Input line: | you> ... |
         prompt = "you> "
-        stdscr.addnstr(height - 2, 0, prompt + self.input, width - 1)
-        cursor_col = min(len(prompt) + len(self.input), width - 2)
-        stdscr.move(height - 2, cursor_col)
+        content = prompt + self.input
+        # Keep the tail of a long line visible so the cursor stays on screen.
+        if len(content) > inner_width:
+            content = content[-inner_width:]
+        stdscr.addnstr(top + 1, 0, "|", 1, border_attr)
+        stdscr.addnstr(top + 1, 1, content.ljust(inner_width), inner_width)
+        stdscr.addnstr(top + 1, geom.width - 1, "|", 1, border_attr)
 
-        # status bar
+        # Bottom border: +-----+
+        stdscr.addnstr(
+            top + 2, 0, "+" + "-" * inner_width + "+", geom.width, border_attr
+        )
+
+        # Park the cursor inside the box, after the typed text.
+        cursor_col = min(1 + len(content), geom.width - 2)
+        stdscr.move(top + 1, cursor_col)
+
+    def _draw_status(
+        self, curses: Any, stdscr: Any, geom: Layout
+    ) -> None:  # pragma: no cover - terminal
+        """Draw the single-line status/hint bar at the very bottom."""
+
         status = (
             f" {self.config.name} | {self.agent.provider.name} | "
             f"tools: {len(self.agent.tools)} | {self.status} "
         )
-        try:
+        with contextlib.suppress(curses.error):
             stdscr.addnstr(
-                height - 1, 0, status.ljust(width - 1), width - 1,
+                geom.status_row,
+                0,
+                status.ljust(geom.width - 1),
+                geom.width - 1,
                 self._color_for(curses, STYLE_USER),
             )
-        except curses.error:
-            pass
-        stdscr.refresh()
 
 
 def run_tui(config: AgentConfig, agent: Optional[Agent] = None) -> int:
@@ -708,20 +837,27 @@ def run_tui(config: AgentConfig, agent: Optional[Agent] = None) -> int:
 
 
 __all__ = [
+    "EVENT_ANSWER",
+    "EVENT_DONE",
+    "EVENT_ERROR",
+    "EVENT_TOOL",
+    "HELP_TEXT",
+    "INPUT_BOX_HEIGHT",
+    "MIN_HEIGHT",
+    "MIN_WIDTH",
+    "STATUS_HEIGHT",
+    "AgentWorker",
+    "Command",
+    "Layout",
+    "SessionStore",
     "Transcript",
     "TranscriptEntry",
-    "Command",
-    "parse_command",
-    "AgentWorker",
-    "WorkerEvent",
-    "EVENT_ANSWER",
-    "EVENT_TOOL",
-    "EVENT_ERROR",
-    "EVENT_DONE",
-    "wrap_text",
-    "render_transcript",
     "TuiApp",
+    "WorkerEvent",
+    "layout",
+    "parse_command",
+    "render_transcript",
     "run_tui",
-    "HELP_TEXT",
-    "SessionStore",
+    "visible_lines",
+    "wrap_text",
 ]
