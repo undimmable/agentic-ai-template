@@ -7,6 +7,7 @@ the final answer. Everything else is configuration or a plugin.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -16,6 +17,15 @@ from .logging_utils import get_logger
 from .messages import ToolCall
 from .providers import LLMProvider, build_provider
 from .tools import Tool, build_tools
+
+#: Stop the tool loop after the same (tool, arguments) pair repeats this many
+#: times - usually a sign the model is stuck retrying a failing call.
+_MAX_REPEATED_TOOL_CALLS = 3
+
+_FINALIZE_PROMPT = (
+    "Tool-use budget reached. Do not call any more tools. "
+    "Summarise what you have found so far and give your best final answer now."
+)
 
 
 def _short(value: Any, limit: int = 120) -> str:
@@ -54,7 +64,13 @@ class Agent:
 
     # -- main entry point -------------------------------------------------- #
     def run(self, prompt: str) -> str:
-        """Run one user turn to completion and return the final answer."""
+        """Run one user turn to completion and return the final answer.
+
+        The loop stops as soon as the model answers without requesting tools.
+        If the tool budget runs out (or the model keeps repeating the same
+        call), the agent makes one final, tool-free request so the user always
+        gets an answer instead of a bare error.
+        """
 
         run_id = uuid4().hex[:8]
         self.logger.info(
@@ -66,42 +82,80 @@ class Agent:
         )
         self.messages.append({"role": "user", "content": prompt})
 
+        tool_counts: Dict[str, int] = {}
+        signatures: Dict[str, int] = {}
+
         for step in range(1, self.config.max_iterations + 1):
             self.logger.debug("[%s] step %d: requesting completion", run_id, step)
             response = self.provider.chat(self.messages, self.tool_schemas)
 
-            if response.wants_tools:
-                self.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": response.content,
-                        "tool_calls": [
-                            call.to_openai() for call in response.tool_calls
-                        ],
-                    }
-                )
-                for call in response.tool_calls:
-                    self.logger.info(
-                        "[%s] step %d: tool %s(%s)",
-                        run_id,
-                        step,
-                        call.name,
-                        _short(call.arguments),
-                    )
-                    result = self._execute_tool(call)
-                    self.messages.append(
-                        {"role": "tool", "tool_call_id": call.id, "content": result}
-                    )
-                continue
+            if not response.wants_tools:
+                content = response.content or ""
+                self.messages.append({"role": "assistant", "content": content})
+                self.logger.info("[%s] EXIT run after %d step(s)", run_id, step)
+                return content
 
-            content = response.content or ""
+            self.messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.content,
+                    "tool_calls": [call.to_openai() for call in response.tool_calls],
+                }
+            )
+            repeated = False
+            for call in response.tool_calls:
+                tool_counts[call.name] = tool_counts.get(call.name, 0) + 1
+                self.logger.info(
+                    "[%s] step %d: tool %s(%s)",
+                    run_id,
+                    step,
+                    call.name,
+                    _short(call.arguments),
+                )
+                result = self._execute_tool(call)
+                self.messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": result}
+                )
+                signature = (
+                    f"{call.name}:"
+                    f"{json.dumps(call.arguments, sort_keys=True, default=str)}"
+                )
+                signatures[signature] = signatures.get(signature, 0) + 1
+                if signatures[signature] >= _MAX_REPEATED_TOOL_CALLS:
+                    repeated = True
+
+            if repeated:
+                self.logger.warning(
+                    "[%s] same tool call repeated %d times; stopping tool use",
+                    run_id,
+                    _MAX_REPEATED_TOOL_CALLS,
+                )
+                break
+
+        return self._finalize(run_id, tool_counts)
+
+    def _finalize(self, run_id: str, tool_counts: Dict[str, int]) -> str:
+        """Ask for one last tool-free answer after the tool budget is spent."""
+
+        self.logger.warning(
+            "[%s] tool budget exhausted; requesting a final answer", run_id
+        )
+        self.messages.append({"role": "user", "content": _FINALIZE_PROMPT})
+        response = self.provider.chat(self.messages, None)
+        content = (response.content or "").strip()
+        if content:
             self.messages.append({"role": "assistant", "content": content})
-            self.logger.info("[%s] EXIT run after %d step(s)", run_id, step)
+            self.logger.info("[%s] EXIT run via finalization", run_id)
             return content
 
+        trace = (
+            ", ".join(f"{name} x{count}" for name, count in sorted(tool_counts.items()))
+            or "none"
+        )
         raise MaxIterationsError(
             f"Agent '{self.config.name}' exceeded max_iterations="
-            f"{self.config.max_iterations} without producing a final answer"
+            f"{self.config.max_iterations} without producing a final answer "
+            f"(tool calls: {trace})"
         )
 
     # -- internals --------------------------------------------------------- #

@@ -137,3 +137,57 @@ def test_multiple_tool_calls_in_one_turn():
 
     tool_messages = [m for m in agent.messages if m["role"] == "tool"]
     assert [m["content"] for m in tool_messages] == ["echo:a", "echo:b"]
+
+
+def test_agent_finalizes_without_tools_when_budget_exhausted():
+    provider = StubProvider(
+        [
+            LLMResponse(
+                tool_calls=[ToolCall(id="1", name="echo", arguments={"text": "x"})]
+            ),
+            LLMResponse(
+                tool_calls=[ToolCall(id="2", name="echo", arguments={"text": "y"})]
+            ),
+            LLMResponse(content="final summary"),
+        ]
+    )
+    agent = Agent(
+        AgentConfig(max_iterations=2), provider=provider, tools={"echo": echo_tool()}
+    )
+
+    assert agent.run("go") == "final summary"
+    assert provider.calls[-1]["tools"] is None
+    assert agent.messages[-1] == {"role": "assistant", "content": "final summary"}
+
+
+def test_agent_stops_on_repeated_identical_tool_calls():
+    repeated = LLMResponse(
+        tool_calls=[ToolCall(id="1", name="echo", arguments={"text": "same"})]
+    )
+    provider = StubProvider(
+        [repeated, repeated, repeated, LLMResponse(content="stopped")]
+    )
+    agent = Agent(
+        AgentConfig(max_iterations=10), provider=provider, tools={"echo": echo_tool()}
+    )
+
+    assert agent.run("go") == "stopped"
+    tool_messages = [m for m in agent.messages if m["role"] == "tool"]
+    assert len(tool_messages) == 3  # stopped early, not after 10 iterations
+
+
+def test_iterations_error_includes_tool_trace():
+    provider = StubProvider(
+        [
+            LLMResponse(
+                tool_calls=[ToolCall(id=str(i), name="echo", arguments={"text": "x"})]
+            )
+            for i in range(4)
+        ]
+    )
+    agent = Agent(
+        AgentConfig(max_iterations=1), provider=provider, tools={"echo": echo_tool()}
+    )
+
+    with pytest.raises(MaxIterationsError, match=r"tool calls: echo x1"):
+        agent.run("go")

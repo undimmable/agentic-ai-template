@@ -96,7 +96,9 @@ minimal:
 - **Tool registry**: `read_file`, `write_file`, `list_dir` and an optional
   `shell`, confined to a configurable workspace.
 - **Agent loop**: request completion -> run requested tools -> feed results back
-  -> repeat until a final answer or `max_iterations`.
+  -> repeat until a final answer. If the tool budget is spent (or the model
+  repeats the same call), one last tool-free request is made so you always get
+  an answer instead of a bare error.
 - **CLI + REPL** and expressive, traceable logging.
 
 ### Quickstart
