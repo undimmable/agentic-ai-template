@@ -287,17 +287,30 @@ def wrap_text(text: str, width: int) -> List[str]:
     return lines or [""]
 
 
+#: Indent applied to wrapped content lines when headers are shown.
+_INDENT = "  "
+
+
 def render_transcript(
     transcript: Transcript, width: int, *, show_headers: bool = True
 ) -> List[Tuple[str, str]]:
-    """Flatten the transcript into ``(style, line)`` pairs for the renderer."""
+    """Flatten the transcript into ``(style, line)`` pairs for the renderer.
 
+    Every returned line is guaranteed to be at most ``width`` columns wide,
+    *including* the indent added to content lines, so the renderer can draw
+    them without the terminal wrapping them onto the next row (which would
+    push the body into the input line).
+    """
+
+    indent = _INDENT if show_headers else ""
+    # Reserve room for the indent so indent + content never exceeds ``width``.
+    content_width = max(1, width - len(indent))
     rendered: List[Tuple[str, str]] = []
     for entry in transcript:
         if show_headers:
             rendered.append((entry.style, f"{entry.header()}>"))
-        for line in wrap_text(entry.text, width):
-            rendered.append((entry.style, f"  {line}" if show_headers else line))
+        for line in wrap_text(entry.text, content_width):
+            rendered.append((entry.style, f"{indent}{line}"))
     return rendered
 
 

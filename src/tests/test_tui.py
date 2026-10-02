@@ -113,6 +113,28 @@ def test_render_transcript_without_headers():
     assert rendered == [(tui.STYLE_AGENT, "hi")]
 
 
+def test_render_transcript_lines_never_exceed_width():
+    # Regression: content wrapped to the full width plus the 2-space indent
+    # used to exceed the draw limit, so the terminal wrapped the line onto the
+    # next row and the body overlapped the input line.
+    transcript = tui.Transcript()
+    transcript.add("assistant", "x" * 100, tui.STYLE_AGENT)
+
+    width = 20
+    rendered = tui.render_transcript(transcript, width=width)
+    assert rendered  # non-empty
+    assert all(len(text) <= width for _, text in rendered)
+
+
+def test_render_transcript_without_headers_lines_fit_width():
+    transcript = tui.Transcript()
+    transcript.add("assistant", "y" * 100, tui.STYLE_AGENT)
+
+    width = 20
+    rendered = tui.render_transcript(transcript, width=width, show_headers=False)
+    assert all(len(text) <= width for _, text in rendered)
+
+
 # --------------------------------------------------------------------------- #
 # background worker
 # --------------------------------------------------------------------------- #
