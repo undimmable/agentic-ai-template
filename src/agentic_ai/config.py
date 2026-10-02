@@ -135,6 +135,12 @@ def _as_str_list(value: Any, path: str) -> List[str]:
     return list(value)
 
 
+def _as_bool(value: Any, path: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{path} must be a boolean, got {type(value).__name__}")
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # config dataclasses
 # --------------------------------------------------------------------------- #
@@ -233,12 +239,36 @@ class ToolConfig:
 
 
 @dataclass
+class SessionConfig:
+    """Where conversations are persisted between runs.
+
+    Sessions are stored in a small SQLite database so the TUI can list previous
+    conversations and reload one. ``path`` defaults to
+    :data:`~agentic_ai.sessions.DEFAULT_DB_PATH`; set ``enabled: false`` to run
+    entirely in memory.
+    """
+
+    enabled: bool = True
+    path: str = ".agentic/sessions.db"
+
+    @classmethod
+    def from_dict(cls, data: Any, path: str = "sessions") -> "SessionConfig":
+        data = _expect_mapping(data or {}, path)
+        _reject_unknown(data, {"enabled", "path"}, path)
+        return cls(
+            enabled=_as_bool(data.get("enabled", True), f"{path}.enabled"),
+            path=_as_str(data.get("path", ".agentic/sessions.db"), f"{path}.path"),
+        )
+
+
+@dataclass
 class AgentConfig:
     name: str = "agent"
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     max_iterations: int = 10
     provider: ProviderConfig = field(default_factory=ProviderConfig)
     tools: ToolConfig = field(default_factory=ToolConfig)
+    sessions: SessionConfig = field(default_factory=SessionConfig)
     source: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -247,7 +277,7 @@ class AgentConfig:
         data = _expect_mapping(data or {}, "$")
         agent = _expect_mapping(data.get("agent", {}) or {}, "agent")
         _reject_unknown(agent, {"name", "system_prompt", "max_iterations"}, "agent")
-        known = {"version", "agent", "provider", "tools"}
+        known = {"version", "agent", "provider", "tools", "sessions"}
         return cls(
             name=_as_str(agent.get("name", "agent"), "agent.name"),
             system_prompt=_as_str(
@@ -258,6 +288,7 @@ class AgentConfig:
             ),
             provider=ProviderConfig.from_dict(data.get("provider", {})),
             tools=ToolConfig.from_dict(data.get("tools", {})),
+            sessions=SessionConfig.from_dict(data.get("sessions", {})),
             extra={key: value for key, value in data.items() if key not in known},
         )
 
@@ -334,4 +365,10 @@ tools:
     - shell
   workspace: .
   shell_timeout: 30
+
+sessions:
+  # Conversations are persisted in a small SQLite database so the TUI can
+  # list previous sessions and reload one to continue where you left off.
+  enabled: true
+  path: .agentic/sessions.db
 """

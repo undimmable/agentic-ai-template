@@ -2,10 +2,14 @@ instructions:
   - Replace TODO in the ticket with DONE when you finished with the task. Task is finished when the code is implemented, tested and commited (see integration-driven development guide).
 main-quest:
   tasks:
-    1: [TODO] TBD
+    1: [DONE] Store sessions in the SQLite database and retrieve them from the list in the TUI
        details:
-         - TBD
-    
+         - Add a stdlib-only SQLite session store (sessions.py) with save/list/load/delete.
+         - Add a `sessions:` config section (enabled, path) parsed into SessionConfig.
+         - Add Agent.load_messages() to rehydrate a stored conversation.
+         - Persist the conversation after each TUI turn and on exit.
+         - Add /sessions, /load <id> and /save [name] TUI commands.
+         - Cover the store, config, agent and TUI with unit tests.
 
 side-quest:
   tasks:

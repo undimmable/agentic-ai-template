@@ -119,6 +119,39 @@ def test_reset_keeps_only_system_prompt():
     assert agent.messages[0]["role"] == "system"
 
 
+def test_load_messages_replaces_history():
+    agent = Agent(AgentConfig(), provider=StubProvider([]), tools={})
+    stored = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+
+    agent.load_messages(stored)
+
+    assert agent.messages == stored
+    # A copy is kept, so mutating the source does not affect the agent.
+    stored.append({"role": "user", "content": "extra"})
+    assert len(agent.messages) == 3
+
+
+def test_load_messages_prepends_system_prompt_when_missing():
+    agent = Agent(AgentConfig(), provider=StubProvider([]), tools={})
+
+    agent.load_messages([{"role": "user", "content": "hi"}])
+
+    assert agent.messages[0]["role"] == "system"
+    assert agent.messages[0]["content"] == agent.config.system_prompt
+    assert agent.messages[1] == {"role": "user", "content": "hi"}
+
+
+def test_load_messages_handles_empty_list():
+    agent = Agent(AgentConfig(), provider=StubProvider([]), tools={})
+    agent.load_messages([])
+    assert len(agent.messages) == 1
+    assert agent.messages[0]["role"] == "system"
+
+
 def test_multiple_tool_calls_in_one_turn():
     provider = StubProvider(
         [

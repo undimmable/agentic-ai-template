@@ -39,6 +39,7 @@ from .agent import (
 from .config import AgentConfig
 from .errors import AgenticError
 from .logging_utils import get_logger
+from .sessions import SessionError, SessionStore
 
 # --------------------------------------------------------------------------- #
 # transcript model
@@ -101,6 +102,9 @@ HELP_TEXT = """\
 commands:
   /help          show this help
   /tools         list the tools enabled for this agent
+  /sessions      list stored sessions
+  /load <id>     load a stored session and continue it
+  /save [name]   save the current conversation as a session
   /reset         clear the conversation history
   /clear         clear the on-screen transcript
   /exit, /quit   leave the interface
@@ -301,9 +305,19 @@ def render_transcript(
 # curses application
 # --------------------------------------------------------------------------- #
 class TuiApp:
-    """The curses view/controller around an :class:`AgentWorker`."""
+    """The curses view/controller around an :class:`AgentWorker`.
 
-    def __init__(self, config: AgentConfig, agent: Agent) -> None:
+    When sessions are enabled in the config, the conversation is persisted to a
+    SQLite database after every completed turn, and ``/sessions`` / ``/load``
+    let the human browse and resume earlier conversations.
+    """
+
+    def __init__(
+        self,
+        config: AgentConfig,
+        agent: Agent,
+        store: Optional[SessionStore] = None,
+    ) -> None:
         self.config = config
         self.agent = agent
         self.worker = AgentWorker(agent)
@@ -312,6 +326,112 @@ class TuiApp:
         self.scroll = 0  # lines scrolled up from the bottom
         self.status = "ready"
         self.logger = get_logger("tui")
+        self.store = store if store is not None else self._build_store(config)
+        #: Id of the session currently being persisted, once one exists.
+        self.session_id: Optional[int] = None
+
+    @staticmethod
+    def _build_store(config: AgentConfig) -> Optional[SessionStore]:
+        """Create a :class:`SessionStore` from the config, or ``None`` if off."""
+
+        if not config.sessions.enabled:
+            return None
+        return SessionStore(config.sessions.path)
+
+    # -- session persistence ----------------------------------------------- #
+    def _session_name(self) -> str:
+        """A human-friendly default name for the current conversation."""
+
+        for entry in self.transcript:
+            if entry.style == STYLE_USER:
+                first_line = entry.text.strip().splitlines()[0]
+                return first_line[:60] or self.config.name
+        return self.config.name
+
+    def save_session(self, name: Optional[str] = None) -> Optional[int]:
+        """Persist the current conversation, returning the session id.
+
+        Returns ``None`` when sessions are disabled or there is nothing worth
+        saving (only the system prompt). Reuses the current session id so a
+        resumed conversation keeps updating the same row.
+        """
+
+        if self.store is None:
+            return None
+        if len(self.agent.messages) <= 1:
+            return None
+        try:
+            self.session_id = self.store.save_session(
+                name or self._session_name(),
+                self.agent.messages,
+                session_id=self.session_id,
+            )
+        except SessionError as exc:
+            self.logger.warning("could not save session: %s", exc)
+            self.transcript.add("system", f"could not save session: {exc}", STYLE_ERROR)
+            return None
+        return self.session_id
+
+    def list_sessions(self) -> List[Any]:
+        """Return stored sessions, or an empty list when sessions are disabled."""
+
+        if self.store is None:
+            return []
+        try:
+            return self.store.list_sessions()
+        except SessionError as exc:
+            self.logger.warning("could not list sessions: %s", exc)
+            self.transcript.add("system", f"could not list sessions: {exc}", STYLE_ERROR)
+            return []
+
+    def load_session(self, session_id: int) -> bool:
+        """Load a stored session into the agent and rebuild the transcript.
+
+        Returns ``True`` on success. The on-screen transcript is cleared and
+        repopulated from the stored messages so the human sees the resumed
+        conversation.
+        """
+
+        if self.store is None:
+            self.transcript.add(
+                "system", "sessions are disabled in the config", STYLE_ERROR
+            )
+            return False
+        try:
+            messages = self.store.load_session(session_id)
+        except SessionError as exc:
+            self.transcript.add("system", f"could not load session: {exc}", STYLE_ERROR)
+            return False
+        if messages is None:
+            self.transcript.add(
+                "system", f"no session with id {session_id}", STYLE_ERROR
+            )
+            return False
+
+        self.agent.load_messages(messages)
+        self.session_id = session_id
+        self.transcript.clear()
+        self._render_messages(messages)
+        self.transcript.add(
+            "system", f"loaded session {session_id}", STYLE_SYSTEM
+        )
+        return True
+
+    def _render_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """Rebuild the transcript from a stored message list."""
+
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content") or ""
+            if role == "system":
+                continue
+            if role == "user":
+                self.transcript.add("user", content, STYLE_USER)
+            elif role == "assistant":
+                if content:
+                    self.transcript.add("assistant", content, STYLE_AGENT)
+            elif role == "tool":
+                self.transcript.add("tool", content, STYLE_TOOL)
 
     # -- state transitions (testable without curses) ----------------------- #
     def handle_command(self, command: Command) -> bool:
@@ -325,8 +445,15 @@ class TuiApp:
         elif name == "tools":
             tools = ", ".join(sorted(self.agent.tools)) or "(no tools enabled)"
             self.transcript.add("system", f"enabled tools: {tools}", STYLE_SYSTEM)
+        elif name == "sessions":
+            self._command_sessions()
+        elif name == "load":
+            self._command_load(command.argument)
+        elif name == "save":
+            self._command_save(command.argument)
         elif name == "reset":
             self.agent.reset()
+            self.session_id = None
             self.transcript.add("system", "conversation history cleared", STYLE_SYSTEM)
         elif name == "clear":
             self.transcript.clear()
@@ -335,6 +462,55 @@ class TuiApp:
                 "system", f"unknown command: /{name} (try /help)", STYLE_ERROR
             )
         return True
+
+    def _command_sessions(self) -> None:
+        if self.store is None:
+            self.transcript.add(
+                "system", "sessions are disabled in the config", STYLE_SYSTEM
+            )
+            return
+        sessions = self.list_sessions()
+        if not sessions:
+            self.transcript.add("system", "no stored sessions", STYLE_SYSTEM)
+            return
+        lines = ["stored sessions:"]
+        for info in sessions:
+            marker = "*" if info.id == self.session_id else " "
+            lines.append(
+                f" {marker} [{info.id}] {info.name} "
+                f"({info.message_count} messages, {info.updated_at_str})"
+            )
+        lines.append("use /load <id> to resume one")
+        self.transcript.add("system", "\n".join(lines), STYLE_SYSTEM)
+
+    def _command_load(self, argument: str) -> None:
+        argument = argument.strip()
+        if not argument:
+            self.transcript.add(
+                "system", "usage: /load <id> (see /sessions)", STYLE_ERROR
+            )
+            return
+        try:
+            session_id = int(argument)
+        except ValueError:
+            self.transcript.add(
+                "system", f"'{argument}' is not a session id (see /sessions)",
+                STYLE_ERROR,
+            )
+            return
+        self.load_session(session_id)
+
+    def _command_save(self, argument: str) -> None:
+        if self.store is None:
+            self.transcript.add(
+                "system", "sessions are disabled in the config", STYLE_SYSTEM
+            )
+            return
+        session_id = self.save_session(argument.strip() or None)
+        if session_id is not None:
+            self.transcript.add(
+                "system", f"saved session {session_id}", STYLE_SYSTEM
+            )
 
     def submit_prompt(self, prompt: str) -> None:
         """Record a prompt and hand it to the worker."""
@@ -363,6 +539,8 @@ class TuiApp:
                 self.transcript.add("system", event.text, STYLE_ERROR)
             elif event.kind == EVENT_DONE:
                 self.status = "ready"
+                # Persist the conversation once the turn has fully completed.
+                self.save_session()
 
     # -- curses plumbing --------------------------------------------------- #
     def run(self, stdscr: Any) -> None:  # pragma: no cover - needs a terminal
@@ -508,6 +686,10 @@ def run_tui(config: AgentConfig, agent: Optional[Agent] = None) -> int:
     except KeyboardInterrupt:  # pragma: no cover - interactive only
         pass
     finally:
+        # Persist the final state, then release the provider and the database.
+        app.save_session()
+        if app.store is not None:
+            app.store.close()
         agent.provider.close()
     return 0
 
@@ -528,4 +710,5 @@ __all__ = [
     "TuiApp",
     "run_tui",
     "HELP_TEXT",
+    "SessionStore",
 ]

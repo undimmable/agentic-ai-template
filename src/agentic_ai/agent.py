@@ -83,6 +83,21 @@ class Agent:
 
         self.messages = [{"role": "system", "content": self.config.system_prompt}]
 
+    def load_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """Replace the conversation with a previously stored one.
+
+        Used to resume a persisted session. The stored history is expected to
+        begin with its own system prompt; if it does not, the configured system
+        prompt is prepended so the agent always has one.
+        """
+
+        restored = [dict(message) for message in messages]
+        if not restored or restored[0].get("role") != "system":
+            restored.insert(
+                0, {"role": "system", "content": self.config.system_prompt}
+            )
+        self.messages = restored
+
     @property
     def tool_schemas(self) -> Optional[List[Dict[str, Any]]]:
         schemas = [tool.schema() for tool in self.tools.values()]

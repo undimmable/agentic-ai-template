@@ -103,6 +103,10 @@ minimal:
   terminal interface (`agentic tui`) that streams the reasoning trail -
   prompts, tool calls and results - as it happens, plus expressive,
   traceable logging.
+- **Persistent sessions**: conversations are stored in a small SQLite database
+  (stdlib `sqlite3`, no extra dependency) so the TUI can list previous sessions
+  and reload one to continue where you left off. Configure it under `sessions:`
+  in `agent.yaml` (`enabled`, `path`).
 
 ### Quickstart
 
@@ -117,7 +121,10 @@ agentic tui                        # full-screen terminal interface
 ```
 
 Useful commands: `agentic validate`, `agentic tools`, `agentic providers`.
-The TUI understands `/help`, `/tools`, `/reset`, `/clear` and `/exit`.
+The TUI understands `/help`, `/tools`, `/sessions`, `/load <id>`, `/save [name]`,
+`/reset`, `/clear` and `/exit`. The conversation is saved automatically after
+each turn; use `/sessions` to list stored sessions and `/load <id>` to resume
+one.
 Set `provider.type: stub` for a fully offline run, or pin a provider explicitly
 with `provider.type: deepseek` / `openai`.
 
@@ -147,6 +154,7 @@ src/agentic_ai/
   registry.py          generic name -> object registry
   messages.py          provider-neutral ToolCall / LLMResponse
   agent.py             the agent loop
+  sessions.py          SQLite-backed session storage and retrieval
   cli.py               agentic CLI (init/run/repl/tui/validate/tools/providers)
   tui.py               full-screen curses interface (agentic tui)
   providers/           provider interface + OpenAI-compatible + stub

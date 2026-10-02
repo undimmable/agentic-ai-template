@@ -7,6 +7,7 @@ from .config import (
     DEFAULT_SYSTEM_PROMPT,
     AgentConfig,
     ProviderConfig,
+    SessionConfig,
     ToolConfig,
     dump_example_config,
     load_config,
@@ -21,6 +22,7 @@ from .errors import (
     ToolError,
 )
 from .messages import LLMResponse, ToolCall
+from .sessions import SessionInfo, SessionStore
 
 __version__ = "0.1.0"
 
@@ -28,6 +30,7 @@ __all__ = [
     "Agent",
     "AgentConfig",
     "ProviderConfig",
+    "SessionConfig",
     "ToolConfig",
     "load_config",
     "loads_config",
@@ -41,5 +44,7 @@ __all__ = [
     "MaxIterationsError",
     "LLMResponse",
     "ToolCall",
+    "SessionStore",
+    "SessionInfo",
     "__version__",
 ]

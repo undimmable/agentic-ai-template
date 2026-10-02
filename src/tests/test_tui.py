@@ -250,3 +250,170 @@ def test_app_submit_prompt_ignores_empty():
     app = tui.TuiApp(AgentConfig(), make_agent([]))
     app.submit_prompt("")
     assert len(app.transcript) == 0
+
+
+# --------------------------------------------------------------------------- #
+# session persistence and retrieval
+# --------------------------------------------------------------------------- #
+def make_store() -> "tui.SessionStore":
+    return tui.SessionStore(":memory:")
+
+
+def test_app_persists_conversation_after_turn():
+    agent = make_agent([LLMResponse(content="answer")])
+    store = make_store()
+    app = tui.TuiApp(AgentConfig(), agent, store=store)
+
+    app.submit_prompt("question")
+    _wait_until_idle(app.worker)
+    app.pump_events()
+
+    sessions = store.list_sessions()
+    assert len(sessions) == 1
+    assert app.session_id == sessions[0].id
+    # system + user + assistant
+    assert sessions[0].message_count == 3
+
+
+def test_app_reuses_session_id_across_turns():
+    agent = make_agent([LLMResponse(content="one"), LLMResponse(content="two")])
+    store = make_store()
+    app = tui.TuiApp(AgentConfig(), agent, store=store)
+
+    app.submit_prompt("first")
+    _wait_until_idle(app.worker)
+    app.pump_events()
+    first_id = app.session_id
+
+    app.submit_prompt("second")
+    _wait_until_idle(app.worker)
+    app.pump_events()
+
+    assert app.session_id == first_id
+    assert len(store.list_sessions()) == 1  # updated in place, not duplicated
+
+
+def test_app_sessions_command_lists_stored_sessions():
+    agent = make_agent([LLMResponse(content="answer")])
+    store = make_store()
+    app = tui.TuiApp(AgentConfig(), agent, store=store)
+    app.submit_prompt("question")
+    _wait_until_idle(app.worker)
+    app.pump_events()
+
+    app.handle_command(tui.parse_command("/sessions"))
+    listing = app.transcript.entries[-1].text
+    assert "stored sessions:" in listing
+    assert "question" in listing  # default name derived from the first prompt
+
+
+def test_app_sessions_command_with_no_sessions():
+    app = tui.TuiApp(AgentConfig(), make_agent([]), store=make_store())
+    app.handle_command(tui.parse_command("/sessions"))
+    assert app.transcript.entries[-1].text == "no stored sessions"
+
+
+def test_app_load_restores_conversation_and_transcript():
+    # Seed a store with a saved conversation.
+    store = make_store()
+    session_id = store.save_session(
+        "earlier",
+        [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ],
+    )
+
+    agent = make_agent([])
+    app = tui.TuiApp(AgentConfig(), agent, store=store)
+    app.transcript.add("user", "stale", tui.STYLE_USER)
+
+    assert app.load_session(session_id) is True
+
+    # Agent history restored (system prompt preserved from the stored session).
+    assert agent.messages[0] == {"role": "system", "content": "sys"}
+    assert agent.messages[1] == {"role": "user", "content": "old question"}
+    assert agent.messages[2] == {"role": "assistant", "content": "old answer"}
+    assert app.session_id == session_id
+
+    # Transcript rebuilt from the stored messages, stale entry gone.
+    texts = [e.text for e in app.transcript]
+    assert "old question" in texts
+    assert "old answer" in texts
+    assert "stale" not in texts
+
+
+def test_app_load_command_parses_id():
+    store = make_store()
+    session_id = store.save_session(
+        "s", [{"role": "user", "content": "hi"}]
+    )
+    app = tui.TuiApp(AgentConfig(), make_agent([]), store=store)
+
+    app.handle_command(tui.parse_command(f"/load {session_id}"))
+    assert app.session_id == session_id
+
+
+def test_app_load_command_rejects_bad_id():
+    app = tui.TuiApp(AgentConfig(), make_agent([]), store=make_store())
+    app.handle_command(tui.parse_command("/load notanumber"))
+    assert app.transcript.entries[-1].style == tui.STYLE_ERROR
+
+
+def test_app_load_command_requires_argument():
+    app = tui.TuiApp(AgentConfig(), make_agent([]), store=make_store())
+    app.handle_command(tui.parse_command("/load"))
+    assert app.transcript.entries[-1].style == tui.STYLE_ERROR
+
+
+def test_app_load_unknown_session_reports_error():
+    app = tui.TuiApp(AgentConfig(), make_agent([]), store=make_store())
+    assert app.load_session(12345) is False
+    assert app.transcript.entries[-1].style == tui.STYLE_ERROR
+
+
+def test_app_save_command_with_name():
+    agent = make_agent([LLMResponse(content="answer")])
+    store = make_store()
+    app = tui.TuiApp(AgentConfig(), agent, store=store)
+    app.submit_prompt("question")
+    _wait_until_idle(app.worker)
+    app.pump_events()
+
+    app.handle_command(tui.parse_command("/save my session"))
+    assert store.list_sessions()[0].name == "my session"
+
+
+def test_app_reset_clears_current_session_id():
+    agent = make_agent([LLMResponse(content="answer")])
+    store = make_store()
+    app = tui.TuiApp(AgentConfig(), agent, store=store)
+    app.submit_prompt("question")
+    _wait_until_idle(app.worker)
+    app.pump_events()
+    assert app.session_id is not None
+
+    app.handle_command(tui.parse_command("/reset"))
+    assert app.session_id is None
+
+
+def test_app_with_sessions_disabled_has_no_store():
+    config = AgentConfig()
+    config.sessions.enabled = False
+    app = tui.TuiApp(config, make_agent([]))
+    assert app.store is None
+
+    # Commands degrade gracefully rather than crashing.
+    app.handle_command(tui.parse_command("/sessions"))
+    assert "disabled" in app.transcript.entries[-1].text
+    assert app.save_session() is None
+    assert app.list_sessions() == []
+
+
+def test_app_save_skips_empty_conversation():
+    store = make_store()
+    app = tui.TuiApp(AgentConfig(), make_agent([]), store=store)
+    # Only the system prompt is present, so nothing is worth saving.
+    assert app.save_session() is None
+    assert store.list_sessions() == []

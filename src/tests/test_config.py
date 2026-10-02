@@ -156,3 +156,30 @@ def test_explicit_values_override_detected_profile(monkeypatch):
     assert config.provider.type == "deepseek"
     assert config.provider.model == "deepseek-reasoner"
     assert config.provider.base_url == "https://api.deepseek.com/v1"
+
+
+# --------------------------------------------------------------------------- #
+# sessions
+# --------------------------------------------------------------------------- #
+def test_sessions_default_to_enabled():
+    config = loads_config("")
+    assert config.sessions.enabled is True
+    assert config.sessions.path == ".agentic/sessions.db"
+
+
+def test_sessions_section_is_parsed():
+    config = loads_config(
+        "sessions:\n  enabled: false\n  path: /tmp/my-sessions.db\n"
+    )
+    assert config.sessions.enabled is False
+    assert config.sessions.path == "/tmp/my-sessions.db"
+
+
+def test_sessions_enabled_must_be_bool():
+    with pytest.raises(ConfigError, match="enabled"):
+        loads_config("sessions:\n  enabled: yes please\n")
+
+
+def test_unknown_sessions_key_raises():
+    with pytest.raises(ConfigError, match="sessions"):
+        loads_config("sessions:\n  bogus: 1\n")
