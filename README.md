@@ -62,9 +62,13 @@ Referencing `agentic-guidelines.md`, a table of principles maps directly to impl
 ### Agent Initialization
 
 ```python
-from agentic_ai import Agent
+from agentic_ai import Agent, load_config
 
-agent = Agent()
+config = load_config("agent.yaml")
+agent = Agent(config)
+
+answer = agent.run("Summarise this repository")
+print(answer)
 ```
 
 ### Scenario-Based Testing
@@ -73,6 +77,70 @@ Run tests to ensure system functionality matches the documented behavior:
 
 ```sh
 pytest tests/
+```
+
+## MVP runtime: `agentic_ai`
+
+The repository also ships a small, working agent runtime that turns the ideas in
+these documents into an executable, config-driven system. It is intentionally
+minimal:
+
+- **Declarative config** (`agent.yaml`) describes the agent, the model provider
+  and the tools it may use. Every value has a default, and `${VAR}` /
+  `${VAR:-default}` environment expansion is supported — the "NixOS" part.
+- **Provider registry**: any OpenAI-compatible `/chat/completions` endpoint
+  (OpenAI, Azure, OpenRouter, Ollama, LM Studio, vLLM, ...). Add a backend by
+  registering a factory — the "Emacs" part.
+- **Tool registry**: `read_file`, `write_file`, `list_dir` and an optional
+  `shell`, confined to a configurable workspace.
+- **Agent loop**: request completion -> run requested tools -> feed results back
+  -> repeat until a final answer or `max_iterations`.
+- **CLI + REPL** and expressive, traceable logging.
+
+### Quickstart
+
+```sh
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+agentic init                       # write an example agent.yaml
+export OPENAI_API_KEY=sk-...       # or point base_url at a local model
+agentic run "Summarise this repository"
+agentic repl                       # interactive session
+```
+
+Useful commands: `agentic validate`, `agentic tools`, `agentic providers`.
+Set `provider.type: stub` for a fully offline run.
+
+### Extending
+
+Register a new tool:
+
+```python
+from agentic_ai.tools import TOOL_REGISTRY, tool
+
+@tool("word_count", "Count words in a text.",
+      {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]})
+def word_count(text: str) -> str:
+    return str(len(text.split()))
+
+TOOL_REGISTRY.register("word_count", lambda config: word_count)
+```
+
+Then add `word_count` to `tools.enabled` in `agent.yaml`. Providers follow the
+same pattern through `agentic_ai.providers.PROVIDER_REGISTRY`.
+
+### Layout
+
+```
+src/agentic_ai/
+  config.py            declarative config parsing and validation
+  registry.py          generic name -> object registry
+  messages.py          provider-neutral ToolCall / LLMResponse
+  agent.py             the agent loop
+  cli.py               agentic CLI (init/run/repl/validate/tools/providers)
+  providers/           provider interface + OpenAI-compatible + stub
+  tools/               tool interface + built-ins
+src/tests/             unit tests (pytest)
 ```
 
 ## Documentation Links

@@ -172,3 +172,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Agentic runtime - local, machine-specific config (keep agent.example.yaml)
+agent.yaml
+*.local.yaml
+

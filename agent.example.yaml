@@ -1,0 +1,32 @@
+# Example declarative config for the agentic_ai runtime.
+# Copy it with `agentic init`, or use it directly:
+#   agentic -c agent.example.yaml validate
+#   agentic -c agent.example.yaml run "Summarise the repository"
+version: 1
+
+agent:
+  name: freyja
+  system_prompt: |
+    You are an agentic AI collaborating with a human on this repository.
+    Inspect files before changing them, make small verifiable edits, and
+    finish with a concise summary of what you did.
+  max_iterations: 12
+
+provider:
+  type: openai            # any OpenAI-compatible /chat/completions endpoint
+  base_url: https://api.openai.com/v1
+  # base_url: http://localhost:11434/v1   # Ollama, LM Studio, vLLM, ...
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
+  # api_key: ${MY_PROVIDER_KEY}          # ${VAR} and ${VAR:-default} are expanded
+  temperature: 0.2
+  timeout: 60
+
+tools:
+  enabled:
+    - read_file
+    - write_file
+    - list_dir
+    - shell
+  workspace: .
+  shell_timeout: 30
