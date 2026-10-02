@@ -8,7 +8,8 @@ the final answer. Everything else is configuration or a plugin.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from .config import AgentConfig
@@ -26,6 +27,31 @@ _FINALIZE_PROMPT = (
     "Tool-use budget reached. Do not call any more tools. "
     "Summarise what you have found so far and give your best final answer now."
 )
+
+#: Event kinds emitted through the optional ``on_event`` callback.
+EVENT_TOOL_CALL = "tool_call"
+EVENT_TOOL_RESULT = "tool_result"
+EVENT_FINAL = "final"
+
+
+@dataclass
+class AgentEvent:
+    """A single observable step of the agent loop.
+
+    The loop is otherwise opaque to callers that only want the final string;
+    this lets an interface (the TUI, a logger, a test) watch the reasoning
+    trail as it happens without reaching into ``agent.messages``.
+    """
+
+    kind: str
+    name: str = ""
+    arguments: Optional[Dict[str, Any]] = None
+    result: str = ""
+    text: str = ""
+
+
+#: Signature of the observer passed to :meth:`Agent.run`.
+EventCallback = Callable[[AgentEvent], None]
 
 
 def _short(value: Any, limit: int = 120) -> str:
@@ -63,14 +89,25 @@ class Agent:
         return schemas or None
 
     # -- main entry point -------------------------------------------------- #
-    def run(self, prompt: str) -> str:
+    def run(self, prompt: str, on_event: Optional[EventCallback] = None) -> str:
         """Run one user turn to completion and return the final answer.
 
         The loop stops as soon as the model answers without requesting tools.
         If the tool budget runs out (or the model keeps repeating the same
         call), the agent makes one final, tool-free request so the user always
         gets an answer instead of a bare error.
+
+        ``on_event``, when given, is called with an :class:`AgentEvent` for each
+        tool call, tool result and the final answer, so a front-end can render
+        the reasoning trail live.
         """
+
+        def emit(event: AgentEvent) -> None:
+            if on_event is not None:
+                try:
+                    on_event(event)
+                except Exception:  # noqa: BLE001 - observers must not break the loop
+                    self.logger.exception("event observer raised; ignoring")
 
         run_id = uuid4().hex[:8]
         self.logger.info(
@@ -93,6 +130,7 @@ class Agent:
                 content = response.content or ""
                 self.messages.append({"role": "assistant", "content": content})
                 self.logger.info("[%s] EXIT run after %d step(s)", run_id, step)
+                emit(AgentEvent(kind=EVENT_FINAL, text=content))
                 return content
 
             self.messages.append(
@@ -112,7 +150,19 @@ class Agent:
                     call.name,
                     _short(call.arguments),
                 )
+                emit(
+                    AgentEvent(
+                        kind=EVENT_TOOL_CALL,
+                        name=call.name,
+                        arguments=dict(call.arguments or {}),
+                    )
+                )
                 result = self._execute_tool(call)
+                emit(
+                    AgentEvent(
+                        kind=EVENT_TOOL_RESULT, name=call.name, result=result
+                    )
+                )
                 self.messages.append(
                     {"role": "tool", "tool_call_id": call.id, "content": result}
                 )
@@ -132,9 +182,11 @@ class Agent:
                 )
                 break
 
-        return self._finalize(run_id, tool_counts)
+        return self._finalize(run_id, tool_counts, emit)
 
-    def _finalize(self, run_id: str, tool_counts: Dict[str, int]) -> str:
+    def _finalize(
+        self, run_id: str, tool_counts: Dict[str, int], emit: EventCallback
+    ) -> str:
         """Ask for one last tool-free answer after the tool budget is spent."""
 
         self.logger.warning(
@@ -146,6 +198,7 @@ class Agent:
         if content:
             self.messages.append({"role": "assistant", "content": content})
             self.logger.info("[%s] EXIT run via finalization", run_id)
+            emit(AgentEvent(kind=EVENT_FINAL, text=content))
             return content
 
         trace = (

@@ -53,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("prompt", nargs="+", help="The prompt to send.")
 
     sub.add_parser("repl", help="Start an interactive session.")
+    sub.add_parser("tui", help="Start the full-screen terminal interface.")
     sub.add_parser("validate", help="Validate the config and print a summary.")
     sub.add_parser("tools", help="List registered and enabled tools.")
     sub.add_parser("providers", help="List registered provider types.")
@@ -105,6 +106,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         agent.provider.close()
     print(answer)
     return 0
+
+
+def _cmd_tui(args: argparse.Namespace) -> int:
+    config = _load(args.config)
+    from .tui import run_tui
+
+    return run_tui(config)
 
 
 def _cmd_repl(args: argparse.Namespace) -> int:
@@ -178,6 +186,7 @@ _COMMANDS = {
     "init": _cmd_init,
     "run": _cmd_run,
     "repl": _cmd_repl,
+    "tui": _cmd_tui,
     "validate": _cmd_validate,
     "tools": _cmd_tools,
     "providers": _cmd_providers,

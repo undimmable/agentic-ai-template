@@ -1,0 +1,252 @@
+"""Tests for the terminal user interface.
+
+Everything except the thin curses shell is plain Python, so these tests cover
+the transcript model, slash-command parsing, text wrapping, the background
+worker and the app's state transitions without needing a terminal.
+"""
+
+from __future__ import annotations
+
+import time
+
+from agentic_ai import tui
+from agentic_ai.agent import Agent
+from agentic_ai.config import AgentConfig
+from agentic_ai.messages import LLMResponse, ToolCall
+from agentic_ai.providers.stub import StubProvider
+from agentic_ai.tools.base import FunctionTool
+
+
+def echo_tool() -> FunctionTool:
+    return FunctionTool(
+        lambda text: f"echo:{text}",
+        name="echo",
+        description="Echo the input.",
+        parameters={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+    )
+
+
+def make_agent(responses, tools=None) -> Agent:
+    provider = StubProvider(responses)
+    return Agent(AgentConfig(), provider=provider, tools=tools or {})
+
+
+# --------------------------------------------------------------------------- #
+# transcript model
+# --------------------------------------------------------------------------- #
+def test_transcript_add_and_clear():
+    transcript = tui.Transcript()
+    transcript.add("user", "hi", tui.STYLE_USER)
+    transcript.add("assistant", "hello", tui.STYLE_AGENT)
+
+    assert len(transcript) == 2
+    assert [e.style for e in transcript] == [tui.STYLE_USER, tui.STYLE_AGENT]
+    assert transcript.entries[0].header() == "you"
+
+    transcript.clear()
+    assert len(transcript) == 0
+
+
+def test_transcript_is_bounded():
+    transcript = tui.Transcript(limit=3)
+    for i in range(5):
+        transcript.add("assistant", str(i))
+
+    assert len(transcript) == 3
+    assert [e.text for e in transcript] == ["2", "3", "4"]
+
+
+# --------------------------------------------------------------------------- #
+# slash commands
+# --------------------------------------------------------------------------- #
+def test_parse_command_recognises_slash_commands():
+    command = tui.parse_command("/tools")
+    assert command.is_command
+    assert command.name == "tools"
+    assert command.argument == ""
+
+
+def test_parse_command_keeps_argument():
+    command = tui.parse_command("/foo bar baz")
+    assert command.name == "foo"
+    assert command.argument == "bar baz"
+
+
+def test_parse_command_treats_plain_text_as_prompt():
+    command = tui.parse_command("  hello world  ")
+    assert not command.is_command
+    assert command.argument == "hello world"
+
+
+# --------------------------------------------------------------------------- #
+# wrapping / rendering
+# --------------------------------------------------------------------------- #
+def test_wrap_text_wraps_on_word_boundaries():
+    assert tui.wrap_text("one two three", 7) == ["one two", "three"]
+
+
+def test_wrap_text_preserves_newlines():
+    assert tui.wrap_text("a\nb", 10) == ["a", "b"]
+
+
+def test_wrap_text_hard_splits_long_words():
+    assert tui.wrap_text("abcdefgh", 3) == ["abc", "def", "gh"]
+
+
+def test_render_transcript_includes_headers_and_indent():
+    transcript = tui.Transcript()
+    transcript.add("user", "hi", tui.STYLE_USER)
+
+    rendered = tui.render_transcript(transcript, width=20)
+    assert rendered == [(tui.STYLE_USER, "you>"), (tui.STYLE_USER, "  hi")]
+
+
+def test_render_transcript_without_headers():
+    transcript = tui.Transcript()
+    transcript.add("assistant", "hi", tui.STYLE_AGENT)
+
+    rendered = tui.render_transcript(transcript, width=20, show_headers=False)
+    assert rendered == [(tui.STYLE_AGENT, "hi")]
+
+
+# --------------------------------------------------------------------------- #
+# background worker
+# --------------------------------------------------------------------------- #
+def _wait_for_done(worker: tui.AgentWorker, timeout: float = 5.0):
+    """Block until the worker's turn finishes, then return its events.
+
+    Drains the queue, so callers that want the app to process the events
+    themselves should use :func:`_wait_until_idle` instead.
+    """
+
+    _wait_until_idle(worker, timeout)
+    return worker.drain()
+
+
+def _wait_until_idle(worker: tui.AgentWorker, timeout: float = 5.0) -> None:
+    """Block until the worker is no longer busy, leaving events queued."""
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not worker.busy():
+            return
+        time.sleep(0.01)
+    raise AssertionError("worker did not finish in time")
+
+
+def test_worker_reports_answer():
+    agent = make_agent([LLMResponse(content="hello")])
+    worker = tui.AgentWorker(agent)
+
+    assert worker.submit("hi") is True
+    events = _wait_for_done(worker)
+
+    answers = [e for e in events if e.kind == tui.EVENT_ANSWER]
+    assert answers and answers[0].text == "hello"
+    assert not worker.busy()
+
+
+def test_worker_reports_tool_calls_and_results():
+    agent = make_agent(
+        [
+            LLMResponse(
+                tool_calls=[ToolCall(id="1", name="echo", arguments={"text": "hi"})]
+            ),
+            LLMResponse(content="done"),
+        ],
+        tools={"echo": echo_tool()},
+    )
+    worker = tui.AgentWorker(agent)
+
+    worker.submit("go")
+    events = _wait_for_done(worker)
+
+    tool_events = [e for e in events if e.kind == tui.EVENT_TOOL]
+    assert any("echo(text='hi')" in e.text for e in tool_events)
+    assert any("echo -> echo:hi" in e.text for e in tool_events)
+    assert all(e.name == "echo" for e in tool_events)
+
+
+def test_worker_reports_errors():
+    agent = make_agent([])
+    # Force the provider to raise so the worker surfaces an error event.
+    agent.provider.chat = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    worker = tui.AgentWorker(agent)
+
+    worker.submit("go")
+    events = _wait_for_done(worker)
+
+    errors = [e for e in events if e.kind == tui.EVENT_ERROR]
+    assert errors and "boom" in errors[0].text
+
+
+def test_worker_rejects_concurrent_submit():
+    agent = make_agent([LLMResponse(content="slow")])
+    worker = tui.AgentWorker(agent)
+
+    # Simulate a turn already in flight.
+    worker._busy = True
+    assert worker.submit("again") is False
+
+
+# --------------------------------------------------------------------------- #
+# app state transitions
+# --------------------------------------------------------------------------- #
+def test_app_help_and_unknown_command():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+
+    assert app.handle_command(tui.parse_command("/help")) is True
+    assert "commands:" in app.transcript.entries[-1].text
+
+    app.handle_command(tui.parse_command("/nope"))
+    assert app.transcript.entries[-1].style == tui.STYLE_ERROR
+
+
+def test_app_exit_command_returns_false():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    assert app.handle_command(tui.parse_command("/exit")) is False
+    assert app.handle_command(tui.parse_command("/quit")) is False
+
+
+def test_app_reset_clears_history():
+    agent = make_agent([LLMResponse(content="one")])
+    app = tui.TuiApp(AgentConfig(), agent)
+    agent.run("first")
+    assert len(agent.messages) == 3
+
+    app.handle_command(tui.parse_command("/reset"))
+    assert len(agent.messages) == 1
+
+
+def test_app_clear_empties_transcript():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app.transcript.add("user", "hi")
+    app.handle_command(tui.parse_command("/clear"))
+    assert len(app.transcript) == 0
+
+
+def test_app_submit_prompt_records_and_pumps():
+    agent = make_agent([LLMResponse(content="answer")])
+    app = tui.TuiApp(AgentConfig(), agent)
+
+    app.submit_prompt("question")
+    assert app.transcript.entries[0].style == tui.STYLE_USER
+    assert app.status == "thinking..."
+
+    _wait_until_idle(app.worker)
+    app.pump_events()
+
+    assert app.status == "ready"
+    assert any(
+        e.style == tui.STYLE_AGENT and e.text == "answer" for e in app.transcript
+    )
+
+
+def test_app_submit_prompt_ignores_empty():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app.submit_prompt("")
+    assert len(app.transcript) == 0

@@ -99,7 +99,10 @@ minimal:
   -> repeat until a final answer. If the tool budget is spent (or the model
   repeats the same call), one last tool-free request is made so you always get
   an answer instead of a bare error.
-- **CLI + REPL** and expressive, traceable logging.
+- **CLI + REPL + TUI**: a line-based REPL and a full-screen, curses-based
+  terminal interface (`agentic tui`) that streams the reasoning trail -
+  prompts, tool calls and results - as it happens, plus expressive,
+  traceable logging.
 
 ### Quickstart
 
@@ -110,9 +113,11 @@ agentic init                       # write an example agent.yaml
 export DEEPSEEK_API_KEY=sk-...     # DeepSeek is auto-selected (else OpenAI)
 agentic run "Summarise this repository"
 agentic repl                       # interactive session
+agentic tui                        # full-screen terminal interface
 ```
 
 Useful commands: `agentic validate`, `agentic tools`, `agentic providers`.
+The TUI understands `/help`, `/tools`, `/reset`, `/clear` and `/exit`.
 Set `provider.type: stub` for a fully offline run, or pin a provider explicitly
 with `provider.type: deepseek` / `openai`.
 
@@ -142,7 +147,8 @@ src/agentic_ai/
   registry.py          generic name -> object registry
   messages.py          provider-neutral ToolCall / LLMResponse
   agent.py             the agent loop
-  cli.py               agentic CLI (init/run/repl/validate/tools/providers)
+  cli.py               agentic CLI (init/run/repl/tui/validate/tools/providers)
+  tui.py               full-screen curses interface (agentic tui)
   providers/           provider interface + OpenAI-compatible + stub
   tools/               tool interface + built-ins
 src/tests/             unit tests (pytest)
