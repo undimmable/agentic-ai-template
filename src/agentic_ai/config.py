@@ -29,13 +29,41 @@ DEFAULT_SYSTEM_PROMPT = (
 
 _DEFAULT_TOOLS = ["read_file", "write_file", "list_dir"]
 
-_DEFAULT_PROVIDER = {
-    "type": "openai",
-    "base_url": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini",
-    "api_key_env": "OPENAI_API_KEY",
-    "timeout": 60.0,
+# Defaults per provider type. Values from a config file always win; these only
+# fill the gaps so a one-line config works.
+PROVIDER_PROFILES: Dict[str, Dict[str, Any]] = {
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+        "api_key_env": "OPENAI_API_KEY",
+    },
+    "openai-compatible": {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+        "api_key_env": "OPENAI_API_KEY",
+    },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key_env": "DEEPSEEK_API_KEY",
+    },
+    "stub": {"base_url": "", "model": "stub", "api_key_env": None},
 }
+
+DEFAULT_PROVIDER_TYPE = "openai"
+_DEFAULT_TIMEOUT = 60.0
+
+
+def detect_provider_type() -> str:
+    """Choose a default provider from the API keys present in the environment.
+
+    DeepSeek wins over OpenAI when ``DEEPSEEK_API_KEY`` is set. An explicit
+    ``provider.type`` in the config always takes precedence over detection.
+    """
+
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        return "deepseek"
+    return DEFAULT_PROVIDER_TYPE
 
 
 # --------------------------------------------------------------------------- #
@@ -120,6 +148,7 @@ class ProviderConfig:
     temperature: Optional[float] = None
     timeout: float = 60.0
     options: Dict[str, Any] = field(default_factory=dict)
+    type_explicit: bool = False
 
     @classmethod
     def from_dict(cls, data: Any, path: str = "provider") -> "ProviderConfig":
@@ -138,19 +167,26 @@ class ProviderConfig:
             },
             path,
         )
+        type_explicit = "type" in data
+        provider_type = (
+            _as_str(data["type"], f"{path}.type")
+            if type_explicit
+            else detect_provider_type()
+        )
+        profile = PROVIDER_PROFILES.get(
+            provider_type, PROVIDER_PROFILES[DEFAULT_PROVIDER_TYPE]
+        )
         options = _expect_mapping(data.get("options", {}) or {}, f"{path}.options")
         temperature = data.get("temperature")
         return cls(
-            type=_as_str(data.get("type", _DEFAULT_PROVIDER["type"]), f"{path}.type"),
+            type=provider_type,
             base_url=_as_str(
-                data.get("base_url", _DEFAULT_PROVIDER["base_url"]), f"{path}.base_url"
+                data.get("base_url", profile["base_url"]), f"{path}.base_url"
             ),
-            model=_as_str(
-                data.get("model", _DEFAULT_PROVIDER["model"]), f"{path}.model"
-            ),
+            model=_as_str(data.get("model", profile["model"]), f"{path}.model"),
             api_key=_as_str(data.get("api_key"), f"{path}.api_key", allow_none=True),
             api_key_env=_as_str(
-                data.get("api_key_env", _DEFAULT_PROVIDER["api_key_env"]),
+                data.get("api_key_env", profile["api_key_env"]),
                 f"{path}.api_key_env",
                 allow_none=True,
             ),
@@ -159,10 +195,9 @@ class ProviderConfig:
                 if temperature is None
                 else _as_float(temperature, f"{path}.temperature")
             ),
-            timeout=_as_float(
-                data.get("timeout", _DEFAULT_PROVIDER["timeout"]), f"{path}.timeout"
-            ),
+            timeout=_as_float(data.get("timeout", _DEFAULT_TIMEOUT), f"{path}.timeout"),
             options=dict(options),
+            type_explicit=type_explicit,
         )
 
     def resolve_api_key(self) -> Optional[str]:
@@ -279,12 +314,15 @@ agent:
   max_iterations: 12
 
 provider:
-  type: openai            # any OpenAI-compatible /chat/completions endpoint
-  base_url: https://api.openai.com/v1
-  # base_url: http://localhost:11434/v1   # Ollama, LM Studio, vLLM, ...
-  model: gpt-4o-mini
-  api_key_env: OPENAI_API_KEY
-  # api_key: ${MY_PROVIDER_KEY}          # ${VAR} and ${VAR:-default} are expanded
+  # The provider is auto-detected from the environment:
+  #   DEEPSEEK_API_KEY set -> deepseek, otherwise -> openai.
+  # Uncomment `type` to pin one explicitly (an explicit type always wins).
+  # type: deepseek
+  # Any OpenAI-compatible /chat/completions endpoint works:
+  #   base_url: https://api.deepseek.com/v1
+  #   base_url: http://localhost:11434/v1   # Ollama, LM Studio, vLLM, ...
+  # model: deepseek-chat
+  # api_key: ${DEEPSEEK_API_KEY}          # ${VAR} and ${VAR:-default} are expanded
   temperature: 0.2
   timeout: 60
 

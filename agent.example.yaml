@@ -13,12 +13,15 @@ agent:
   max_iterations: 12
 
 provider:
-  type: openai            # any OpenAI-compatible /chat/completions endpoint
-  base_url: https://api.openai.com/v1
-  # base_url: http://localhost:11434/v1   # Ollama, LM Studio, vLLM, ...
-  model: gpt-4o-mini
-  api_key_env: OPENAI_API_KEY
-  # api_key: ${MY_PROVIDER_KEY}          # ${VAR} and ${VAR:-default} are expanded
+  # The provider is auto-detected from the environment:
+  #   DEEPSEEK_API_KEY set -> deepseek, otherwise -> openai.
+  # Uncomment `type` to pin one explicitly (an explicit type always wins).
+  # type: deepseek
+  # Any OpenAI-compatible /chat/completions endpoint works:
+  #   base_url: https://api.deepseek.com/v1
+  #   base_url: http://localhost:11434/v1   # Ollama, LM Studio, vLLM, ...
+  # model: deepseek-chat
+  # api_key: ${DEEPSEEK_API_KEY}          # ${VAR} and ${VAR:-default} are expanded
   temperature: 0.2
   timeout: 60
 

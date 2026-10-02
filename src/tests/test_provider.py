@@ -134,3 +134,19 @@ def test_build_provider_from_config():
 def test_registry_lists_openai_and_stub():
     assert "openai" in PROVIDER_REGISTRY
     assert "stub" in PROVIDER_REGISTRY
+
+
+def test_registry_lists_deepseek():
+    assert "deepseek" in PROVIDER_REGISTRY
+
+
+def test_build_deepseek_provider_from_detected_config(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-secret")
+
+    config = ProviderConfig.from_dict({})
+    provider = build_provider(config)
+
+    assert config.type == "deepseek"
+    assert provider.base_url == "https://api.deepseek.com/v1"
+    assert provider.model == "deepseek-chat"
+    assert provider.api_key == "ds-secret"

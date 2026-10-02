@@ -19,6 +19,7 @@ PROVIDER_REGISTRY: Registry[ProviderFactory] = Registry("provider")
 
 PROVIDER_REGISTRY.register("openai", OpenAICompatibleProvider.from_config)
 PROVIDER_REGISTRY.register("openai-compatible", OpenAICompatibleProvider.from_config)
+PROVIDER_REGISTRY.register("deepseek", OpenAICompatibleProvider.from_config)
 PROVIDER_REGISTRY.register("stub", lambda _config: StubProvider())
 
 

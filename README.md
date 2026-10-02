@@ -89,7 +89,9 @@ minimal:
   and the tools it may use. Every value has a default, and `${VAR}` /
   `${VAR:-default}` environment expansion is supported — the "NixOS" part.
 - **Provider registry**: any OpenAI-compatible `/chat/completions` endpoint
-  (OpenAI, Azure, OpenRouter, Ollama, LM Studio, vLLM, ...). Add a backend by
+  (OpenAI, DeepSeek, Azure, OpenRouter, Ollama, LM Studio, vLLM, ...). The
+  provider is auto-detected: if `DEEPSEEK_API_KEY` is set, DeepSeek is used,
+  otherwise OpenAI. An explicit `provider.type` always wins. Add a backend by
   registering a factory — the "Emacs" part.
 - **Tool registry**: `read_file`, `write_file`, `list_dir` and an optional
   `shell`, confined to a configurable workspace.
@@ -103,13 +105,14 @@ minimal:
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
 agentic init                       # write an example agent.yaml
-export OPENAI_API_KEY=sk-...       # or point base_url at a local model
+export DEEPSEEK_API_KEY=sk-...     # DeepSeek is auto-selected (else OpenAI)
 agentic run "Summarise this repository"
 agentic repl                       # interactive session
 ```
 
 Useful commands: `agentic validate`, `agentic tools`, `agentic providers`.
-Set `provider.type: stub` for a fully offline run.
+Set `provider.type: stub` for a fully offline run, or pin a provider explicitly
+with `provider.type: deepseek` / `openai`.
 
 ### Extending
 

@@ -8,6 +8,13 @@ from agentic_ai.config import DEFAULT_SYSTEM_PROMPT, load_config, loads_config
 from agentic_ai.errors import ConfigError
 
 
+@pytest.fixture(autouse=True)
+def _clear_provider_keys(monkeypatch):
+    """Keep provider auto-detection deterministic across tests."""
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+
 def test_minimal_config_uses_defaults():
     config = loads_config("agent:\n  name: test\n")
 
@@ -107,3 +114,45 @@ def test_unknown_provider_key_raises():
 def test_unknown_tools_key_raises():
     with pytest.raises(ConfigError, match="Unknown key.*tools"):
         loads_config("tools:\n  workpace: .\n")
+
+
+def test_deepseek_selected_when_key_present(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+
+    config = loads_config("agent:\n  name: test\n")
+
+    assert config.provider.type == "deepseek"
+    assert config.provider.base_url == "https://api.deepseek.com/v1"
+    assert config.provider.model == "deepseek-chat"
+    assert config.provider.api_key_env == "DEEPSEEK_API_KEY"
+    assert config.provider.resolve_api_key() == "ds-key"
+    assert config.provider.type_explicit is False
+
+
+def test_explicit_type_wins_over_detection(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+
+    config = loads_config("provider:\n  type: openai\n")
+
+    assert config.provider.type == "openai"
+    assert config.provider.model == "gpt-4o-mini"
+    assert config.provider.type_explicit is True
+
+
+def test_deepseek_profile_used_for_explicit_type(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+
+    config = loads_config("provider:\n  type: deepseek\n")
+
+    assert config.provider.base_url == "https://api.deepseek.com/v1"
+    assert config.provider.model == "deepseek-chat"
+
+
+def test_explicit_values_override_detected_profile(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+
+    config = loads_config("provider:\n  model: deepseek-reasoner\n")
+
+    assert config.provider.type == "deepseek"
+    assert config.provider.model == "deepseek-reasoner"
+    assert config.provider.base_url == "https://api.deepseek.com/v1"
