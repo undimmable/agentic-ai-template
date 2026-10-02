@@ -645,15 +645,20 @@ class TuiApp:
         self.agent.load_messages(messages)
         self.session_id = session_id
         self.transcript.clear()
+        # Announce the load *before* the restored conversation so the newest
+        # lines - the ones the bottom-aligned viewport shows - are the loaded
+        # messages themselves. Adding the confirmation last used to push the
+        # whole conversation off the top of a short terminal, leaving only
+        # "loaded session N" on screen.
+        self.transcript.add(
+            "system", f"loaded session {session_id}", STYLE_SYSTEM
+        )
         self._render_messages(messages)
         # Jump back to the bottom so the freshly loaded conversation is shown
         # from its most recent line. Without this, a scroll offset left over
         # from a longer previous conversation could hide the loaded dump.
         self.scroll = 0
         self.status = "ready"
-        self.transcript.add(
-            "system", f"loaded session {session_id}", STYLE_SYSTEM
-        )
         return True
 
     def _render_messages(self, messages: List[Dict[str, Any]]) -> None:
