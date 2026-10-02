@@ -28,5 +28,5 @@ class LLMProvider(ABC):
     ) -> LLMResponse:
         """Return the next assistant turn for ``messages``."""
 
-    def close(self) -> None:
+    def close(self) -> None:  # noqa: B027 - deliberate no-op default, not abstract
         """Release provider resources. Default is a no-op."""

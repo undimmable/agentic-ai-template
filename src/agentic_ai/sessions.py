@@ -128,7 +128,9 @@ class SessionStore:
         try:
             conn = sqlite3.connect(self.path)
         except sqlite3.Error as exc:  # pragma: no cover - filesystem failure
-            raise SessionError(f"Could not open session database {self.path}: {exc}")
+            raise SessionError(
+                f"Could not open session database {self.path}: {exc}"
+            ) from exc
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SCHEMA)
@@ -194,7 +196,7 @@ class SessionStore:
                     ],
                 )
         except sqlite3.Error as exc:
-            raise SessionError(f"Could not save session '{name}': {exc}")
+            raise SessionError(f"Could not save session '{name}': {exc}") from exc
         self.logger.info(
             "saved session %s ('%s', %d messages)", session_id, name, len(messages)
         )
@@ -209,7 +211,9 @@ class SessionStore:
                     "DELETE FROM sessions WHERE id = ?", (session_id,)
                 )
         except sqlite3.Error as exc:
-            raise SessionError(f"Could not delete session {session_id}: {exc}")
+            raise SessionError(
+                f"Could not delete session {session_id}: {exc}"
+            ) from exc
         return cursor.rowcount > 0
 
     # -- reads ------------------------------------------------------------- #
@@ -226,7 +230,7 @@ class SessionStore:
                 "ORDER BY s.updated_at DESC, s.id DESC"
             ).fetchall()
         except sqlite3.Error as exc:
-            raise SessionError(f"Could not list sessions: {exc}")
+            raise SessionError(f"Could not list sessions: {exc}") from exc
         return [
             SessionInfo(
                 id=row["id"],
@@ -254,7 +258,9 @@ class SessionStore:
                 (session_id,),
             ).fetchall()
         except sqlite3.Error as exc:
-            raise SessionError(f"Could not load session {session_id}: {exc}")
+            raise SessionError(
+                f"Could not load session {session_id}: {exc}"
+            ) from exc
         return [_decode_message(row) for row in rows]
 
     def latest_session_id(self) -> Optional[int]:

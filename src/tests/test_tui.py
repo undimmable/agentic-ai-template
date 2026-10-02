@@ -520,3 +520,192 @@ def test_layout_transcript_collapses_when_terminal_is_short():
 
 def test_layout_rejects_narrow_terminal():
     assert not tui.layout(height=24, width=10).usable
+
+
+def test_layout_grows_input_box_for_multiple_lines():
+    # A multi-line composer takes more rows, pushing the transcript up.
+    single = tui.layout(height=24, width=80, input_lines=1)
+    triple = tui.layout(height=24, width=80, input_lines=3)
+
+    assert triple.input_height == single.input_height + 2
+    assert triple.input_top == single.input_top - 2
+    assert triple.transcript_height == single.transcript_height - 2
+    # The box still sits directly above the status line.
+    assert triple.input_top + triple.input_height == triple.status_row
+
+
+def test_layout_defaults_to_single_input_line():
+    assert tui.layout(height=24, width=80).input_height == tui.INPUT_BOX_HEIGHT
+
+
+# --------------------------------------------------------------------------- #
+# multi-line composer (input wrapping)
+# --------------------------------------------------------------------------- #
+def test_wrap_input_prepends_prompt():
+    assert tui.wrap_input("", 20) == [tui.INPUT_PROMPT]
+    assert tui.wrap_input("hi", 20) == ["you> hi"]
+
+
+def test_wrap_input_wraps_long_text_onto_multiple_lines():
+    lines = tui.wrap_input("one two three four five", 12)
+    assert lines == ["you> one two", "three four", "five"]
+    assert all(len(line) <= 12 for line in lines)
+
+
+def test_wrap_input_preserves_newlines():
+    assert tui.wrap_input("a\nb", 20) == ["you> a", "b"]
+
+
+def test_wrap_input_hard_splits_long_words():
+    lines = tui.wrap_input("abcdefghij", 12)
+    # The prompt occupies the first line, so the word starts on the next one.
+    assert lines == ["you> ", "abcdefghij"]
+
+
+def test_wrap_input_never_exceeds_width():
+    lines = tui.wrap_input("x" * 100, 10)
+    assert all(len(line) <= 10 for line in lines)
+
+
+def test_input_box_height_counts_borders():
+    assert tui.input_box_height(1) == tui.INPUT_BOX_HEIGHT
+    assert tui.input_box_height(3) == 5
+    # Never smaller than a single content line.
+    assert tui.input_box_height(0) == tui.INPUT_BOX_HEIGHT
+
+
+# --------------------------------------------------------------------------- #
+# input history (Up/Down recall)
+# --------------------------------------------------------------------------- #
+def test_history_prev_recalls_previous_prompts():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app._remember("first")
+    app._remember("second")
+
+    app.history_prev()
+    assert app.input == "second"
+    app.history_prev()
+    assert app.input == "first"
+    # Rotates: pressing Up at the oldest entry wraps to the newest.
+    app.history_prev()
+    assert app.input == "second"
+
+
+def test_history_next_rotates_forward():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app._remember("first")
+    app._remember("second")
+
+    app.history_prev()
+    assert app.input == "second"
+    app.history_prev()
+    assert app.input == "first"
+    app.history_next()
+    assert app.input == "second"
+    # Rotates: pressing Down at the newest entry wraps to the oldest.
+    app.history_next()
+    assert app.input == "first"
+
+
+def test_history_rotation_cycles_through_all_prompts():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app._remember("a")
+    app._remember("b")
+    app._remember("c")
+
+    seen = []
+    for _ in range(6):
+        app.history_prev()
+        seen.append(app.input)
+    # Two full backward laps through the three prompts.
+    assert seen == ["c", "b", "a", "c", "b", "a"]
+
+
+def test_history_next_without_browsing_is_noop():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app._remember("first")
+    app.input = "typing"
+    app.history_next()
+    assert app.input == "typing"
+
+
+def test_history_prev_with_empty_history_is_noop():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app.input = "typing"
+    app.history_prev()
+    assert app.input == "typing"
+
+
+def test_remember_collapses_consecutive_duplicates():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app._remember("same")
+    app._remember("same")
+    app._remember("other")
+    assert app.history == ["same", "other"]
+
+
+def test_submit_prompt_records_history():
+    agent = make_agent([LLMResponse(content="answer")])
+    app = tui.TuiApp(AgentConfig(), agent)
+
+    app.submit_prompt("question")
+    assert app.history == ["question"]
+    _wait_until_idle(app.worker)
+
+
+# --------------------------------------------------------------------------- #
+# kill word (Alt+Backspace / Ctrl+Backspace / Ctrl+W)
+# --------------------------------------------------------------------------- #
+def test_kill_word_removes_trailing_word():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app.input = "hello brave world"
+    app.kill_word()
+    assert app.input == "hello brave "
+
+
+def test_kill_word_repeated_walks_back():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app.input = "hello brave world"
+    app.kill_word()
+    app.kill_word()
+    assert app.input == "hello "
+
+
+def test_kill_word_handles_empty_and_whitespace():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app.input = ""
+    app.kill_word()
+    assert app.input == ""
+
+    app.input = "   "
+    app.kill_word()
+    assert app.input == ""
+
+
+def test_kill_word_single_word():
+    app = tui.TuiApp(AgentConfig(), make_agent([]))
+    app.input = "solo"
+    app.kill_word()
+    assert app.input == ""
+
+
+# --------------------------------------------------------------------------- #
+# escape-sequence interpretation (Alt/Ctrl+Backspace must not quit)
+# --------------------------------------------------------------------------- #
+def test_interpret_escape_kills_word_for_backspace_variants():
+    # Alt+Backspace / Ctrl+Backspace arrive as ESC followed by one of these.
+    for tail in ("\x7f", "\b", "\x08"):
+        assert tui.interpret_escape(tail) == tui.ESCAPE_KILL_WORD
+
+
+def test_interpret_escape_quits_on_lone_escape():
+    # A genuine lone ESC (no follow-up byte) still leaves the interface.
+    assert tui.interpret_escape(None) == tui.ESCAPE_QUIT
+
+
+def test_interpret_escape_ignores_unknown_sequences():
+    # Regression: an unrecognised Alt/Ctrl sequence used to fall through to
+    # "quit", so Alt+Backspace killed the whole app when its trailing byte
+    # arrived too late to be read. It must be ignored instead.
+    for tail in ("x", "\x1b", "\x17", "A"):
+        assert tui.interpret_escape(tail) == tui.ESCAPE_IGNORE

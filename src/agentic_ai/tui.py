@@ -109,7 +109,13 @@ commands:
   /reset         clear the conversation history
   /clear         clear the on-screen transcript
   /exit, /quit   leave the interface
-anything else is sent to the agent as a prompt."""
+anything else is sent to the agent as a prompt.
+
+keys:
+  up / down      rotate through previous prompts
+  pgup / pgdn    scroll the transcript
+  alt+backspace  delete the word before the cursor (also ctrl+w)
+  esc            leave the interface"""
 
 
 @dataclass
@@ -338,13 +344,73 @@ def visible_lines(
 # --------------------------------------------------------------------------- #
 # screen layout (pure geometry, so it can be unit-tested without curses)
 # --------------------------------------------------------------------------- #
-#: Height of the pinned input box: a top border, the input line, a bottom border.
+#: Height of the pinned input box with a single content line: a top border,
+#: the input line, and a bottom border.
 INPUT_BOX_HEIGHT = 3
 #: Height of the status/hint line pinned below the input box.
 STATUS_HEIGHT = 1
 #: Minimum terminal size we are willing to draw into.
 MIN_HEIGHT = 6
 MIN_WIDTH = 20
+#: Prefix shown before the human's text inside the composer.
+INPUT_PROMPT = "you> "
+#: Most content lines the composer will grow to before it starts scrolling.
+#: Keeps a pasted wall of text from swallowing the whole transcript.
+MAX_INPUT_LINES = 8
+
+
+def wrap_input(text: str, width: int) -> List[str]:
+    """Wrap the composer text into display lines of at most ``width`` columns.
+
+    The prompt prefix (``you> ``) is prepended to the first line so the caller
+    can draw the wrapped result verbatim. Explicit newlines are honoured, and
+    words longer than ``width`` are hard-split so nothing is ever lost. This
+    mirrors the multi-line composer used by Codex / opencode: when the text is
+    wider than the terminal it flows onto additional lines instead of being
+    truncated to its tail.
+    """
+
+    if width <= 0:
+        return [text]
+    lines: List[str] = []
+    for index, paragraph in enumerate(text.split("\n")):
+        prefix = INPUT_PROMPT if index == 0 else ""
+        # The first line carries the prompt, so it has less room for text.
+        current = prefix
+        current_width = max(1, width - len(prefix))
+        for word in paragraph.split(" "):
+            if word == "":
+                continue
+            while len(word) > current_width:
+                if current.strip():
+                    lines.append(current)
+                    current = ""
+                    current_width = width
+                lines.append(word[:current_width])
+                word = word[current_width:]
+            if current == prefix or not current:
+                # First word on the line: attach it directly to the prompt
+                # (which already ends in a space) or start a fresh line.
+                current = f"{current}{word}"
+            elif len(current) + 1 + len(word) <= width:
+                current = f"{current} {word}"
+            else:
+                lines.append(current)
+                current = word
+                current_width = width
+        if current or not lines:
+            lines.append(current)
+    return lines or [INPUT_PROMPT]
+
+
+def input_box_height(line_count: int) -> int:
+    """Total rows the composer needs for ``line_count`` content lines.
+
+    A top border, the content lines, and a bottom border. Always at least
+    :data:`INPUT_BOX_HEIGHT` so an empty composer keeps its familiar shape.
+    """
+
+    return max(1, line_count) + 2
 
 
 @dataclass
@@ -372,16 +438,19 @@ class Layout:
         return self.height >= MIN_HEIGHT and self.width >= MIN_WIDTH
 
 
-def layout(height: int, width: int) -> Layout:
+def layout(height: int, width: int, input_lines: int = 1) -> Layout:
     """Compute the screen geometry for a terminal of ``height`` x ``width``.
 
     The bottom of the screen is reserved for the input box and the status
-    line; the transcript fills the rows above. When the terminal is too small
-    the transcript is allowed to collapse to zero rows rather than pushing the
-    input box off-screen.
+    line; the transcript fills the rows above. ``input_lines`` is the number
+    of content lines the composer currently needs, so the box grows upward as
+    the human types past the terminal width (like Codex / opencode) instead of
+    truncating the text. When the terminal is too small the transcript is
+    allowed to collapse to zero rows rather than pushing the input box
+    off-screen.
     """
 
-    input_height = INPUT_BOX_HEIGHT
+    input_height = input_box_height(input_lines)
     status_row = height - 1
     input_top = height - 1 - input_height
     transcript_top = 0
@@ -395,6 +464,36 @@ def layout(height: int, width: int) -> Layout:
         input_height=input_height,
         status_row=status_row,
     )
+
+
+# --------------------------------------------------------------------------- #
+# escape-sequence interpretation (pure, so it can be unit-tested)
+# --------------------------------------------------------------------------- #
+#: Characters that mean "delete the previous character" across terminals.
+BACKSPACE_KEYS = ("\x7f", "\b", "\x08")
+
+#: Actions an ESC-prefixed key sequence can resolve to.
+ESCAPE_KILL_WORD = "kill_word"
+ESCAPE_QUIT = "quit"
+ESCAPE_IGNORE = "ignore"
+
+
+def interpret_escape(tail: Any) -> str:
+    """Decide what an ESC-prefixed key sequence means.
+
+    Alt+Backspace and Ctrl+Backspace arrive as an ESC byte followed by a
+    backspace byte, so they must kill the word rather than quit. A genuine
+    lone ESC (``tail is None``) quits, and any other Alt/Ctrl-modified key we
+    do not handle is ignored - crucially, an unrecognised sequence must never
+    terminate the session, which is what used to happen when the follow-up
+    byte arrived too late to be read.
+    """
+
+    if tail in BACKSPACE_KEYS:
+        return ESCAPE_KILL_WORD
+    if tail is None:
+        return ESCAPE_QUIT
+    return ESCAPE_IGNORE
 
 
 # --------------------------------------------------------------------------- #
@@ -425,6 +524,14 @@ class TuiApp:
         self.store = store if store is not None else self._build_store(config)
         #: Id of the session currently being persisted, once one exists.
         self.session_id: Optional[int] = None
+        #: Previously submitted prompts, newest last, for Up/Down recall.
+        self.history: List[str] = []
+        #: Index into :attr:`history` while browsing it, or ``None`` when the
+        #: human is editing a fresh line.
+        self.history_index: Optional[int] = None
+        #: The in-progress line stashed when history browsing begins, restored
+        #: when the human browses back past the newest entry.
+        self.history_draft = ""
 
     @staticmethod
     def _build_store(config: AgentConfig) -> Optional[SessionStore]:
@@ -613,6 +720,68 @@ class TuiApp:
                 "system", f"saved session {session_id}", STYLE_SYSTEM
             )
 
+    # -- input editing (history + word kill) ------------------------------- #
+    def _remember(self, prompt: str) -> None:
+        """Add ``prompt`` to the recall history and reset browsing state.
+
+        Consecutive duplicates are collapsed so holding Up does not wade
+        through the same line repeated.
+        """
+
+        if prompt and (not self.history or self.history[-1] != prompt):
+            self.history.append(prompt)
+        self.history_index = None
+        self.history_draft = ""
+
+    def history_prev(self) -> None:
+        """Recall the previous prompt into the input box (Up arrow).
+
+        The history rotates: pressing Up at the oldest entry wraps around to
+        the newest, so the human can cycle through their last questions
+        without hitting a dead end.
+        """
+
+        if not self.history:
+            return
+        if self.history_index is None:
+            # Stash the line being edited so Down can restore it.
+            self.history_draft = self.input
+            self.history_index = len(self.history)
+        self.history_index = (self.history_index - 1) % len(self.history)
+        self.input = self.history[self.history_index]
+
+    def history_next(self) -> None:
+        """Move forward through recalled prompts (Down arrow).
+
+        Rotates in the opposite direction: pressing Down at the newest entry
+        wraps around to the oldest. When the human has not started browsing
+        yet, Down restores the in-progress draft instead.
+        """
+
+        if self.history_index is None:
+            return
+        self.history_index += 1
+        if self.history_index >= len(self.history):
+            # Past the newest entry: wrap back to the oldest.
+            self.history_index = 0
+        self.input = self.history[self.history_index]
+
+    def kill_word(self) -> None:
+        """Delete the word before the cursor (readline-style).
+
+        Trailing whitespace is removed along with the word, so repeated
+        invocations walk back through the line one word at a time.
+        """
+
+        text = self.input.rstrip()
+        if not text:
+            self.input = ""
+            return
+        index = len(text)
+        while index > 0 and not text[index - 1].isspace():
+            index -= 1
+        self.input = text[:index]
+
     def submit_prompt(self, prompt: str) -> None:
         """Record a prompt and hand it to the worker."""
 
@@ -623,6 +792,7 @@ class TuiApp:
                 "system", "still working on the previous prompt...", STYLE_SYSTEM
             )
             return
+        self._remember(prompt)
         self.transcript.add("user", prompt, STYLE_USER)
         self.status = "thinking..."
         self.scroll = 0
@@ -647,7 +817,7 @@ class TuiApp:
     def run(self, stdscr: Any) -> None:  # pragma: no cover - needs a terminal
         import curses
 
-        curses.curs_set(1)
+        self._set_bar_cursor(curses, stdscr)
         stdscr.nodelay(True)
         stdscr.keypad(True)
         try:
@@ -673,7 +843,7 @@ class TuiApp:
                 key = None
             if key is None:
                 continue
-            if not self._handle_key(curses, key):
+            if not self._handle_key(curses, stdscr, key):
                 break
 
     def _init_colors(self, curses: Any) -> None:  # pragma: no cover - terminal
@@ -698,7 +868,57 @@ class TuiApp:
         except curses.error:
             return 0
 
-    def _handle_key(self, curses: Any, key: Any) -> bool:  # pragma: no cover
+    #: DECSCUSR escape that asks the terminal for a blinking vertical bar.
+    _BAR_CURSOR = "\x1b[5 q"
+
+    def _set_bar_cursor(self, curses: Any, stdscr: Any) -> None:  # pragma: no cover
+        """Show a vertical-bar cursor rather than the default block.
+
+        ``curses.curs_set`` only toggles visibility (and raises on terminals
+        that cannot do it), so we first ask the terminal directly for a bar
+        cursor with the DECSCUSR sequence and fall back to ``curs_set`` when
+        that is unavailable. Both are best-effort: a terminal that supports
+        neither simply keeps its default cursor instead of crashing the UI.
+        """
+
+        with contextlib.suppress(curses.error, OSError):
+            stdscr.addstr(self._BAR_CURSOR)
+            stdscr.refresh()
+        with contextlib.suppress(curses.error):
+            curses.curs_set(1)
+
+    #: Characters that mean "delete the previous character" across terminals.
+    _BACKSPACE_KEYS = BACKSPACE_KEYS
+
+    #: How long to wait for the byte that follows an ESC before treating the
+    #: ESC as a genuine "quit". Long enough to catch Alt/Ctrl+Backspace even
+    #: over a laggy SSH link, short enough that quitting still feels instant.
+    _ESCAPE_TIMEOUT_MS = 150
+
+    def _read_escape_tail(self, stdscr: Any) -> Any:  # pragma: no cover
+        """Read the key following a bare ESC, or ``None`` if none arrives.
+
+        Alt+Backspace and Ctrl+Backspace arrive as an ESC byte followed
+        immediately by a backspace byte. Because the screen is in
+        ``nodelay`` mode the ESC is delivered on its own first, so we briefly
+        switch to a short blocking read to see whether a follow-up key is
+        waiting. A lone ESC (no follow-up) is a genuine "quit".
+        """
+
+        import curses
+
+        try:
+            stdscr.timeout(self._ESCAPE_TIMEOUT_MS)
+            try:
+                return stdscr.get_wch()
+            except curses.error:
+                return None
+        finally:
+            stdscr.nodelay(True)
+
+    def _handle_key(
+        self, curses: Any, stdscr: Any, key: Any
+    ) -> bool:  # pragma: no cover
         if key in ("\n", "\r", curses.KEY_ENTER):
             line = self.input.strip()
             self.input = ""
@@ -709,16 +929,26 @@ class TuiApp:
                 return self.handle_command(command)
             self.submit_prompt(line)
             return True
-        if key in ("\x7f", "\b", curses.KEY_BACKSPACE):
+        if key == "\x17":  # Ctrl+W - kill the word before the cursor
+            self.kill_word()
+            return True
+        if key in self._BACKSPACE_KEYS or key == curses.KEY_BACKSPACE:
             self.input = self.input[:-1]
             return True
-        if key == "\x1b":  # ESC
-            return False
+        if key == "\x1b":  # ESC, or the start of an Alt/Ctrl sequence
+            action = interpret_escape(self._read_escape_tail(stdscr))
+            if action == ESCAPE_KILL_WORD:
+                # Alt+Backspace / Ctrl+Backspace: kill the word, do not quit.
+                self.kill_word()
+                return True
+            # A lone ESC quits; any other Alt/Ctrl-modified key is ignored
+            # rather than terminating the session.
+            return action != ESCAPE_QUIT
         if key == curses.KEY_UP:
-            self.scroll += 1
+            self.history_prev()
             return True
         if key == curses.KEY_DOWN:
-            self.scroll = max(0, self.scroll - 1)
+            self.history_next()
             return True
         if key == curses.KEY_PPAGE:
             self.scroll += 10
@@ -735,14 +965,16 @@ class TuiApp:
     def _draw(self, curses: Any, stdscr: Any) -> None:  # pragma: no cover
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        geom = layout(height, width)
+        inner_width = max(1, width - 2)
+        input_lines = wrap_input(self.input, inner_width)
+        geom = layout(height, width, input_lines=len(input_lines))
         if not geom.usable:
             stdscr.addnstr(0, 0, "terminal too small", max(0, width - 1))
             stdscr.refresh()
             return
 
         self._draw_transcript(curses, stdscr, geom)
-        self._draw_input_box(curses, stdscr, geom)
+        self._draw_input_box(curses, stdscr, geom, input_lines)
         self._draw_status(curses, stdscr, geom)
         stdscr.refresh()
 
@@ -767,9 +999,15 @@ class TuiApp:
             stdscr.addnstr(top + offset, 0, text, geom.width - 1, attr)
 
     def _draw_input_box(
-        self, curses: Any, stdscr: Any, geom: Layout
+        self, curses: Any, stdscr: Any, geom: Layout, lines: List[str]
     ) -> None:  # pragma: no cover - terminal
-        """Draw the bordered composer pinned to the bottom of the screen."""
+        """Draw the bordered composer pinned to the bottom of the screen.
+
+        The composer is multi-line: text wider than the terminal wraps onto
+        additional rows (like Codex / opencode) and the box grows upward to
+        fit, up to :data:`MAX_INPUT_LINES`. When there are more lines than
+        that, the most recent ones are shown so the cursor stays visible.
+        """
 
         top = geom.input_top
         inner_width = max(0, geom.width - 2)
@@ -778,24 +1016,25 @@ class TuiApp:
         # Top border: +-----+
         stdscr.addnstr(top, 0, "+" + "-" * inner_width + "+", geom.width, border_attr)
 
-        # Input line: | you> ... |
-        prompt = "you> "
-        content = prompt + self.input
-        # Keep the tail of a long line visible so the cursor stays on screen.
-        if len(content) > inner_width:
-            content = content[-inner_width:]
-        stdscr.addnstr(top + 1, 0, "|", 1, border_attr)
-        stdscr.addnstr(top + 1, 1, content.ljust(inner_width), inner_width)
-        stdscr.addnstr(top + 1, geom.width - 1, "|", 1, border_attr)
+        # Show the tail of the wrapped text when it exceeds the visible rows.
+        visible = lines[-MAX_INPUT_LINES:]
+        for offset, line in enumerate(visible):
+            row = top + 1 + offset
+            stdscr.addnstr(row, 0, "|", 1, border_attr)
+            stdscr.addnstr(row, 1, line.ljust(inner_width), inner_width)
+            stdscr.addnstr(row, geom.width - 1, "|", 1, border_attr)
 
         # Bottom border: +-----+
+        bottom = top + 1 + len(visible)
         stdscr.addnstr(
-            top + 2, 0, "+" + "-" * inner_width + "+", geom.width, border_attr
+            bottom, 0, "+" + "-" * inner_width + "+", geom.width, border_attr
         )
 
-        # Park the cursor inside the box, after the typed text.
-        cursor_col = min(1 + len(content), geom.width - 2)
-        stdscr.move(top + 1, cursor_col)
+        # Park the cursor after the typed text on the last visible line.
+        last = visible[-1] if visible else INPUT_PROMPT
+        cursor_row = top + len(visible)
+        cursor_col = min(1 + len(last), geom.width - 2)
+        stdscr.move(cursor_row, cursor_col)
 
     def _draw_status(
         self, curses: Any, stdscr: Any, geom: Layout
@@ -837,12 +1076,18 @@ def run_tui(config: AgentConfig, agent: Optional[Agent] = None) -> int:
 
 
 __all__ = [
+    "BACKSPACE_KEYS",
+    "ESCAPE_IGNORE",
+    "ESCAPE_KILL_WORD",
+    "ESCAPE_QUIT",
     "EVENT_ANSWER",
     "EVENT_DONE",
     "EVENT_ERROR",
     "EVENT_TOOL",
     "HELP_TEXT",
     "INPUT_BOX_HEIGHT",
+    "INPUT_PROMPT",
+    "MAX_INPUT_LINES",
     "MIN_HEIGHT",
     "MIN_WIDTH",
     "STATUS_HEIGHT",
@@ -854,10 +1099,13 @@ __all__ = [
     "TranscriptEntry",
     "TuiApp",
     "WorkerEvent",
+    "input_box_height",
+    "interpret_escape",
     "layout",
     "parse_command",
     "render_transcript",
     "run_tui",
     "visible_lines",
+    "wrap_input",
     "wrap_text",
 ]

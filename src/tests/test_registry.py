@@ -36,7 +36,7 @@ def test_replace_registration():
 def test_unknown_name_lists_available():
     registry: Registry[str] = Registry("thing")
     registry.register("a", "first")
-    with pytest.raises(RegistryError, match="thing 'missing'.*a$"):
+    with pytest.raises(RegistryError, match=r"thing 'missing'.*a$"):
         registry.get("missing")
 
 

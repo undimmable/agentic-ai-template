@@ -102,17 +102,17 @@ def test_directory_raises(tmp_path):
 
 
 def test_unknown_agent_key_raises():
-    with pytest.raises(ConfigError, match="Unknown key.*agent"):
+    with pytest.raises(ConfigError, match=r"Unknown key.*agent"):
         loads_config("agent:\n  nam: typo\n")
 
 
 def test_unknown_provider_key_raises():
-    with pytest.raises(ConfigError, match="Unknown key.*provider"):
+    with pytest.raises(ConfigError, match=r"Unknown key.*provider"):
         loads_config("provider:\n  modell: gpt-4o\n")
 
 
 def test_unknown_tools_key_raises():
-    with pytest.raises(ConfigError, match="Unknown key.*tools"):
+    with pytest.raises(ConfigError, match=r"Unknown key.*tools"):
         loads_config("tools:\n  workpace: .\n")
 
 
