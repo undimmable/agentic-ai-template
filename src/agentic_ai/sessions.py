@@ -43,12 +43,13 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    position   INTEGER NOT NULL,
-    role       TEXT    NOT NULL,
-    content    TEXT,
-    tool_calls TEXT
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    position     INTEGER NOT NULL,
+    role         TEXT    NOT NULL,
+    content      TEXT,
+    tool_calls   TEXT,
+    tool_call_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session
@@ -76,7 +77,13 @@ class SessionInfo:
 
 
 def _encode_message(message: Dict[str, Any]) -> Dict[str, Any]:
-    """Flatten one chat message into a row of primitives."""
+    """Flatten one chat message into a row of primitives.
+
+    ``tool_call_id`` is preserved for ``role: "tool"`` messages: strict
+    OpenAI-compatible gateways (e.g. DeepSeek) reject a request whose tool
+    result is missing it with HTTP 422, so dropping it on save would make a
+    reloaded session unusable.
+    """
 
     tool_calls = message.get("tool_calls")
     return {
@@ -85,6 +92,7 @@ def _encode_message(message: Dict[str, Any]) -> Dict[str, Any]:
         "tool_calls": (
             json.dumps(tool_calls, ensure_ascii=False) if tool_calls else None
         ),
+        "tool_call_id": message.get("tool_call_id"),
     }
 
 
@@ -99,6 +107,9 @@ def _decode_message(row: sqlite3.Row) -> Dict[str, Any]:
             message["tool_calls"] = json.loads(row["tool_calls"])
         except (TypeError, ValueError):  # pragma: no cover - corrupt row
             message["tool_calls"] = []
+    tool_call_id = row["tool_call_id"]
+    if tool_call_id is not None:
+        message["tool_call_id"] = tool_call_id
     return message
 
 
@@ -134,9 +145,26 @@ class SessionStore:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SCHEMA)
+        self._migrate(conn)
         conn.commit()
         self.logger.debug("opened session database at %s", self.path)
         return conn
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Bring an older database up to the current schema.
+
+        Databases created before ``tool_call_id`` existed lack the column;
+        ``CREATE TABLE IF NOT EXISTS`` leaves them untouched, so add it here.
+        Existing rows keep a NULL id, which is the best we can do for tool
+        results stored before the column existed.
+        """
+
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(messages)")
+        }
+        if "tool_call_id" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -180,8 +208,9 @@ class SessionStore:
                     )
                 conn.executemany(
                     "INSERT INTO messages "
-                    "(session_id, position, role, content, tool_calls) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "(session_id, position, role, content, tool_calls, "
+                    " tool_call_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
                     [
                         (
                             session_id,
@@ -189,6 +218,7 @@ class SessionStore:
                             encoded["role"],
                             encoded["content"],
                             encoded["tool_calls"],
+                            encoded["tool_call_id"],
                         )
                         for position, encoded in enumerate(
                             _encode_message(m) for m in messages
@@ -253,7 +283,7 @@ class SessionStore:
             if exists is None:
                 return None
             rows = conn.execute(
-                "SELECT role, content, tool_calls FROM messages "
+                "SELECT role, content, tool_calls, tool_call_id FROM messages "
                 "WHERE session_id = ? ORDER BY position",
                 (session_id,),
             ).fetchall()

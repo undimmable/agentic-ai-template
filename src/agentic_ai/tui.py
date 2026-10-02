@@ -26,6 +26,7 @@ importable Python and therefore testable without a terminal:
 from __future__ import annotations
 
 import contextlib
+import json
 import queue
 import threading
 from dataclasses import dataclass, field
@@ -258,6 +259,36 @@ def _format_tool_result(event: AgentEvent) -> str:
     if len(result.splitlines()) > 1 or len(first_line) > 200:
         first_line = first_line[:197] + "..."
     return f"{event.name} -> {first_line}"
+
+
+def _format_stored_tool_call(call: Dict[str, Any]) -> str:
+    """Render a stored (OpenAI-shaped) tool call as a single readable line.
+
+    Stored assistant messages carry ``tool_calls`` in the OpenAI shape, where
+    the function arguments are a JSON *string* rather than a dict. This mirrors
+    :func:`_format_tool_call` so a reloaded session reads the same as the live
+    trail, and it never raises on a malformed row - a bad argument blob is
+    shown verbatim instead of blanking the transcript.
+    """
+
+    function = call.get("function") or {}
+    name = function.get("name") or call.get("name") or "tool"
+    raw = function.get("arguments")
+    if raw is None:
+        raw = call.get("arguments")
+    if not raw:
+        return f"{name}()"
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return f"{name}({raw})"
+    if isinstance(raw, dict):
+        if not raw:
+            return f"{name}()"
+        rendered = ", ".join(f"{key}={value!r}" for key, value in raw.items())
+        return f"{name}({rendered})"
+    return f"{name}({raw!r})"
 
 
 def wrap_text(text: str, width: int) -> List[str]:
@@ -626,7 +657,14 @@ class TuiApp:
         return True
 
     def _render_messages(self, messages: List[Dict[str, Any]]) -> None:
-        """Rebuild the transcript from a stored message list."""
+        """Rebuild the transcript from a stored message list.
+
+        Assistant turns that only requested tools (no textual ``content``)
+        are rendered too, as a ``tool`` line summarising the call, so a
+        reloaded conversation shows the same reasoning trail that was on
+        screen while it happened. Without this, sessions dominated by tool
+        traffic looked empty after ``/load`` even though the data was stored.
+        """
 
         for message in messages:
             role = message.get("role")
@@ -638,6 +676,10 @@ class TuiApp:
             elif role == "assistant":
                 if content:
                     self.transcript.add("assistant", content, STYLE_AGENT)
+                for call in message.get("tool_calls") or []:
+                    self.transcript.add(
+                        "tool", _format_stored_tool_call(call), STYLE_TOOL
+                    )
             elif role == "tool":
                 self.transcript.add("tool", content, STYLE_TOOL)
 
@@ -871,19 +913,35 @@ class TuiApp:
     #: DECSCUSR escape that asks the terminal for a blinking vertical bar.
     _BAR_CURSOR = "\x1b[5 q"
 
+    def _write_bar_cursor(self) -> None:  # pragma: no cover - terminal
+        """Emit the DECSCUSR bar-cursor sequence straight to the terminal.
+
+        The sequence is written to the process's stdout rather than into the
+        curses screen buffer. Writing it with ``stdscr.addstr`` looked like it
+        worked, but :meth:`_draw` calls ``stdscr.erase()`` at the start of
+        every frame, which wiped the escape sequence out of the buffer before
+        it was ever flushed - so the terminal never saw it and kept its
+        default block cursor. Bypassing the buffer (and flushing) makes the
+        request reach the terminal directly.
+        """
+
+        import sys
+
+        with contextlib.suppress(OSError, ValueError):
+            sys.stdout.write(self._BAR_CURSOR)
+            sys.stdout.flush()
+
     def _set_bar_cursor(self, curses: Any, stdscr: Any) -> None:  # pragma: no cover
         """Show a vertical-bar cursor rather than the default block.
 
         ``curses.curs_set`` only toggles visibility (and raises on terminals
-        that cannot do it), so we first ask the terminal directly for a bar
-        cursor with the DECSCUSR sequence and fall back to ``curs_set`` when
-        that is unavailable. Both are best-effort: a terminal that supports
-        neither simply keeps its default cursor instead of crashing the UI.
+        that cannot do it), so we ask the terminal directly for a bar cursor
+        with the DECSCUSR sequence and fall back to ``curs_set`` when that is
+        unavailable. Both are best-effort: a terminal that supports neither
+        simply keeps its default cursor instead of crashing the UI.
         """
 
-        with contextlib.suppress(curses.error, OSError):
-            stdscr.addstr(self._BAR_CURSOR)
-            stdscr.refresh()
+        self._write_bar_cursor()
         with contextlib.suppress(curses.error):
             curses.curs_set(1)
 

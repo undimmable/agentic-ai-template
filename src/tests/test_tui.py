@@ -366,6 +366,72 @@ def test_app_load_restores_conversation_and_transcript():
     assert "stale" not in texts
 
 
+def test_load_renders_tool_call_only_assistant_turns():
+    # Regression: an assistant turn that only requested tools (no textual
+    # content) was dropped when rebuilding the transcript, so a session
+    # dominated by tool traffic looked empty after /load.
+    store = make_store()
+    session_id = store.save_session(
+        "tools",
+        [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "list the files"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "1",
+                        "type": "function",
+                        "function": {
+                            "name": "list_dir",
+                            "arguments": '{"path": "."}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "1", "content": "a\nb"},
+            {"role": "assistant", "content": "here you go"},
+        ],
+    )
+
+    app = tui.TuiApp(AgentConfig(), make_agent([]), store=store)
+    assert app.load_session(session_id) is True
+
+    texts = [e.text for e in app.transcript]
+    assert "list the files" in texts
+    assert "here you go" in texts
+    # The tool-call-only turn is now visible as a summarised call line.
+    assert any("list_dir(path='.')" in t for t in texts)
+    assert "a\nb" in texts
+
+
+def test_format_stored_tool_call_handles_shapes():
+    # Dict arguments (already decoded).
+    assert (
+        tui._format_stored_tool_call(
+            {"function": {"name": "echo", "arguments": {"text": "hi"}}}
+        )
+        == "echo(text='hi')"
+    )
+    # JSON-string arguments (the OpenAI wire shape).
+    assert (
+        tui._format_stored_tool_call(
+            {"function": {"name": "echo", "arguments": '{"text": "hi"}'}}
+        )
+        == "echo(text='hi')"
+    )
+    # No arguments at all.
+    assert tui._format_stored_tool_call({"function": {"name": "ping"}}) == "ping()"
+    # Malformed JSON must not raise; it is shown verbatim.
+    assert (
+        tui._format_stored_tool_call(
+            {"function": {"name": "bad", "arguments": "{not json"}}
+        )
+        == "bad({not json)"
+    )
+
+
 def test_app_load_command_parses_id():
     store = make_store()
     session_id = store.save_session(

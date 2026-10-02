@@ -53,7 +53,10 @@ def test_save_and_load_roundtrip(store):
     assert loaded[1] == {"role": "user", "content": "hello"}
     assert loaded[2]["role"] == "assistant"
     assert loaded[2]["tool_calls"][0]["function"]["name"] == "echo"
-    assert loaded[3]["role"] == "tool"
+    # The tool result must keep its tool_call_id: strict OpenAI-compatible
+    # gateways (e.g. DeepSeek) reject a reloaded conversation whose tool
+    # message is missing it with HTTP 422.
+    assert loaded[3] == {"role": "tool", "tool_call_id": "1", "content": "echo:hi"}
     assert loaded[4] == {"role": "assistant", "content": "done"}
 
 
@@ -142,3 +145,63 @@ def test_session_error_is_agentic_error():
     from agentic_ai.errors import AgenticError
 
     assert issubclass(SessionError, AgenticError)
+
+
+# --------------------------------------------------------------------------- #
+# schema migration
+# --------------------------------------------------------------------------- #
+def test_migrates_legacy_database_without_tool_call_id(tmp_path):
+    """A database created before tool_call_id existed is upgraded on open."""
+
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        """
+        CREATE TABLE sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            position INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_calls TEXT
+        );
+        """
+    )
+    legacy.execute(
+        "INSERT INTO sessions (name, created_at, updated_at) VALUES (?, ?, ?)",
+        ("old", 0.0, 0.0),
+    )
+    legacy.execute(
+        "INSERT INTO messages (session_id, position, role, content) "
+        "VALUES (?, ?, ?, ?)",
+        (1, 0, "user", "hi"),
+    )
+    legacy.commit()
+    legacy.close()
+
+    with SessionStore(path) as store:
+        # Opening the store adds the missing column...
+        columns = {
+            row["name"]
+            for row in store.connection.execute("PRAGMA table_info(messages)")
+        }
+        assert "tool_call_id" in columns
+        # ...and the pre-existing row still loads.
+        assert store.load_session(1) == [{"role": "user", "content": "hi"}]
+        # New tool messages round-trip with their id.
+        store.save_session(
+            "new",
+            [{"role": "tool", "tool_call_id": "abc", "content": "ok"}],
+            session_id=1,
+        )
+        assert store.load_session(1) == [
+            {"role": "tool", "tool_call_id": "abc", "content": "ok"}
+        ]
