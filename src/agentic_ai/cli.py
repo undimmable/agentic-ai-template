@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -147,13 +148,30 @@ def _cmd_repl(args: argparse.Namespace) -> int:
 
 
 def _print_summary(config: AgentConfig) -> None:
+    provider_origin = (
+        "pinned in config"
+        if config.provider.type_explicit
+        else (
+            "auto-detected from DEEPSEEK_API_KEY"
+            if config.provider.type == "deepseek"
+            else "default"
+        )
+    )
     print(f"Config:        {config.source or '(none)'}")
     print(f"Agent name:    {config.name}")
     print(f"Max steps:     {config.max_iterations}")
-    print(f"Provider:      {config.provider.type} / {config.provider.model}")
+    print(
+        f"Provider:      {config.provider.type} / {config.provider.model} "
+        f"({provider_origin})"
+    )
     print(f"Base URL:      {config.provider.base_url}")
     print(f"API key:       {'set' if config.provider.resolve_api_key() else 'not set'}")
     print(f"Enabled tools: {', '.join(config.tools.enabled) or '(none)'}")
+    if config.provider.type == "openai" and os.environ.get("DEEPSEEK_API_KEY"):
+        print(
+            "Note: provider is pinned to 'openai' while DEEPSEEK_API_KEY is set. "
+            "Remove `provider.type` (or set it to 'deepseek') to use DeepSeek."
+        )
 
 
 _COMMANDS = {

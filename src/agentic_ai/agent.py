@@ -58,9 +58,10 @@ class Agent:
 
         run_id = uuid4().hex[:8]
         self.logger.info(
-            "[%s] ENTER run (agent=%s tools=%s)",
+            "[%s] ENTER run (agent=%s provider=%s tools=%s)",
             run_id,
             self.config.name,
+            self.provider.name,
             ", ".join(sorted(self.tools)) or "none",
         )
         self.messages.append({"role": "user", "content": prompt})
