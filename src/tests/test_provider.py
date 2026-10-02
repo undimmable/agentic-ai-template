@@ -9,7 +9,10 @@ import pytest
 from agentic_ai.config import ProviderConfig
 from agentic_ai.errors import ProviderError
 from agentic_ai.providers import PROVIDER_REGISTRY, build_provider
-from agentic_ai.providers.openai_compat import OpenAICompatibleProvider
+from agentic_ai.providers.openai_compat import (
+    OpenAICompatibleProvider,
+    _sanitize,
+)
 
 
 class FakeResponse:
@@ -54,6 +57,42 @@ def test_headers_include_bearer_token_when_key_present():
     provider = make_provider(api_key="secret")
     assert provider._headers()["Authorization"] == "Bearer secret"
     assert "Authorization" not in make_provider()._headers()
+
+
+def test_sanitize_escapes_control_characters():
+    cleaned = _sanitize("a\x00b\x1bc")
+    assert cleaned == "a\\u0000b\\u001bc"
+    # Tab, newline and carriage return are preserved verbatim.
+    assert _sanitize("a\tb\nc\rd") == "a\tb\nc\rd"
+
+
+def test_sanitize_drops_lone_surrogates():
+    cleaned = _sanitize("hello \ud800 world")
+    # The lone surrogate is replaced, so the result encodes as valid UTF-8.
+    cleaned.encode("utf-8")
+
+
+def test_sanitize_walks_nested_structures():
+    cleaned = _sanitize({"messages": [{"content": "x\x00y"}]})
+    assert cleaned == {"messages": [{"content": "x\\u0000y"}]}
+
+
+def test_chat_body_is_valid_utf8_with_control_characters(monkeypatch):
+    provider = make_provider()
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["body"] = request.data
+        return FakeResponse({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    provider.chat([{"role": "user", "content": "bad \x00 and \ud800 chars"}])
+
+    # The body must be valid UTF-8 JSON with no raw control characters.
+    decoded = captured["body"].decode("utf-8")
+    parsed = json.loads(decoded)
+    assert parsed["messages"][0]["content"] == "bad \\u0000 and ? chars"
 
 
 def test_chat_parses_tool_calls(monkeypatch):

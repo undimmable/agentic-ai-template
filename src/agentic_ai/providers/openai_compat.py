@@ -22,6 +22,34 @@ if TYPE_CHECKING:  # pragma: no cover
     from ..config import ProviderConfig
 
 
+def _sanitize(value: Any) -> Any:
+    """Make a value safe to JSON-encode for strict API gateways.
+
+    Message content is assembled from user prompts, model output and tool
+    results (file contents, shell output, ...), any of which can carry bytes
+    that a strict ``/chat/completions`` endpoint rejects with HTTP 422:
+
+    * lone surrogates (e.g. ``\\ud800``) cannot be encoded as UTF-8 at all;
+    * raw control characters other than ``\\t``, ``\\n`` and ``\\r`` are not
+      valid inside JSON strings per RFC 8259.
+
+    Both are normalised here so the request body is always valid UTF-8 JSON.
+    """
+
+    if isinstance(value, str):
+        # Drop lone surrogates by round-tripping through UTF-8.
+        cleaned = value.encode("utf-8", "replace").decode("utf-8")
+        return "".join(
+            ch if ch in "\t\n\r" or ord(ch) >= 0x20 else f"\\u{ord(ch):04x}"
+            for ch in cleaned
+        )
+    if isinstance(value, dict):
+        return {key: _sanitize(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize(item) for item in value]
+    return value
+
+
 class OpenAICompatibleProvider(LLMProvider):
     def __init__(
         self,
@@ -92,7 +120,7 @@ class OpenAICompatibleProvider(LLMProvider):
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> LLMResponse:
-        payload = self._build_payload(messages, tools)
+        payload = _sanitize(self._build_payload(messages, tools))
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self._endpoint(), data=body, headers=self._headers(), method="POST"
